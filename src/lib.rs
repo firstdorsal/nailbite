@@ -1,0 +1,13 @@
+pub mod actions;
+pub mod app;
+pub mod camera;
+pub mod config;
+pub mod detection;
+pub mod errors;
+pub mod exercises;
+pub mod hotkeys;
+pub mod inference;
+pub mod paths;
+pub mod stats;
+pub mod training;
+pub mod ui;

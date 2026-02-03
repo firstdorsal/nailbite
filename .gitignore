@@ -1,0 +1,7 @@
+/target
+*.onnx
+results/
+deployment/results/
+deployment/data/
+*.env
+!config.yaml

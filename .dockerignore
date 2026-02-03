@@ -1,0 +1,11 @@
+target/
+.git/
+.github/
+models/*.onnx
+*.md
+.claude/
+*.env
+.gitignore
+.gitattributes
+.dockerignore
+shell.nix

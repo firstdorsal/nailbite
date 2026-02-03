@@ -1,0 +1,88 @@
+general:
+    log_level: debug
+    show_preview: false
+    cooldown_seconds: 30
+    stats_file: ~/.local/share/nailbite/stats.jsonl
+
+models:
+    palm_detection: ./models/palm_detection.onnx
+    hand_landmark: ./models/hand_landmark.onnx
+    face_detection: ./models/face_detection.onnx
+    face_mesh: ./models/face_mesh.onnx
+
+cameras:
+    - id: main
+      device: /dev/video0
+      role: full
+      width: 640
+      height: 480
+      fps: 30
+      inference_fps: 8
+
+ort:
+    intra_op_num_threads: 2
+    inter_op_num_threads: 1
+
+detection:
+    behaviors:
+        nail_biting:
+            enabled: true
+            proximity_threshold: 0.35
+            min_sustained_ms: 1500
+            confidence_threshold: 0.3
+        nail_picking:
+            enabled: true
+            proximity_threshold: 0.15
+            min_sustained_ms: 1500
+            confidence_threshold: 0.3
+        hair_pulling:
+            enabled: false
+        skin_picking:
+            enabled: false
+        lip_biting:
+            enabled: false
+    temporal:
+        window_ms: 1500
+        positive_ratio: 0.4
+    false_positive:
+        typing_suppression: true
+        chin_rest_suppression: true
+        eating_suppression: true
+
+fusion:
+    strategy: any
+    merge_tolerance_ms: 100
+
+actions:
+    sound:
+        enabled: true
+        file: builtin
+        volume: 0.8
+        repeat: true
+    notification:
+        enabled: true
+    webhook:
+        enabled: false
+        url: ""
+        timeout_ms: 5000
+    popup:
+        enabled: true
+
+exercises:
+    selection_strategy: random
+    preferred_exercise: null
+    hold_duration_override: null
+    reps_override: null
+    timeout_seconds: 120
+    compliance_ratio: 0.8
+
+hotkeys:
+    dismiss_false_positive: F9
+    mark_missed_event: F10
+    pause_resume: F11
+
+training:
+    save_frames: false
+    save_landmarks: true
+    annotations_file: ~/.local/share/nailbite/annotations.jsonl
+    frames_dir: ~/.local/share/nailbite/frames/
