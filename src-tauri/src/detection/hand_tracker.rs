@@ -63,6 +63,19 @@ impl TrackedHand {
         self.confidence = detection.confidence;
         self.last_seen = now;
         self.visible = true;
+
+        // If detection has a pose-corrected side that differs, log but don't change slot assignment
+        // The slot (left/right in HandTracker) determines identity, not this field
+        // This field is informational for the output
+        if let Some(pose_side) = detection.side {
+            if pose_side != self.side {
+                debug!(
+                    tracked_side = ?self.side,
+                    detection_side = ?pose_side,
+                    "Detection side differs from tracked slot (slot assignment stable)"
+                );
+            }
+        }
     }
 
     fn wrist(&self) -> &Landmark {
@@ -139,13 +152,14 @@ impl HandTracker {
         let mut used = vec![false; sorted.len()];
 
         // Phase 1: Match detections to existing tracked hands
-        // Find the BEST match for each detection (closest hand)
+        // When a detection has a pose-corrected side, prefer matching to that side's slot.
+        // This ensures pose estimation overrides position-based heuristics.
         for (i, det) in sorted.iter().enumerate() {
             if used[i] {
                 continue;
             }
 
-            // Calculate distance to both hands, find the closest
+            // Calculate distance to both hands (only consider non-visible slots for matching)
             let left_dist = self.left.as_ref()
                 .filter(|h| !h.visible)
                 .map(|h| h.distance_to(det));
@@ -153,7 +167,67 @@ impl HandTracker {
                 .filter(|h| !h.visible)
                 .map(|h| h.distance_to(det));
 
-            // Match to the closest hand if within threshold
+            // If detection has a pose-corrected side, prefer that side
+            if let Some(pose_side) = det.side {
+                match pose_side {
+                    HandSide::Left => {
+                        if let Some(ld) = left_dist {
+                            if ld < MAX_MATCH_DISTANCE {
+                                self.left.as_mut().unwrap().update(det.clone(), now);
+                                used[i] = true;
+                                debug!(side = "left", distance = ld, pose_corrected = true, "Matched to pose-preferred side");
+                                continue;
+                            }
+                        }
+                    }
+                    HandSide::Right => {
+                        if let Some(rd) = right_dist {
+                            if rd < MAX_MATCH_DISTANCE {
+                                self.right.as_mut().unwrap().update(det.clone(), now);
+                                used[i] = true;
+                                debug!(side = "right", distance = rd, pose_corrected = true, "Matched to pose-preferred side");
+                                continue;
+                            }
+                        }
+                    }
+                }
+                // Pose-corrected side slot not available or too far, try the other slot
+                // but only if it's reasonably close (tighter threshold since it's a side mismatch)
+                let cross_threshold = MAX_MATCH_DISTANCE * 0.5;
+                match pose_side {
+                    HandSide::Left => {
+                        if let Some(rd) = right_dist {
+                            if rd < cross_threshold {
+                                debug!(
+                                    pose_side = "left",
+                                    matching_slot = "right",
+                                    distance = rd,
+                                    "Cross-matching due to slot unavailability"
+                                );
+                                self.right.as_mut().unwrap().update(det.clone(), now);
+                                used[i] = true;
+                            }
+                        }
+                    }
+                    HandSide::Right => {
+                        if let Some(ld) = left_dist {
+                            if ld < cross_threshold {
+                                debug!(
+                                    pose_side = "right",
+                                    matching_slot = "left",
+                                    distance = ld,
+                                    "Cross-matching due to slot unavailability"
+                                );
+                                self.left.as_mut().unwrap().update(det.clone(), now);
+                                used[i] = true;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // No pose-corrected side - fall back to distance-based matching
             match (left_dist, right_dist) {
                 (Some(ld), Some(rd)) => {
                     if ld <= rd && ld < MAX_MATCH_DISTANCE {
