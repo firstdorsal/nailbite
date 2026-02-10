@@ -1,3 +1,6 @@
+# Internal plans and notes (not for git)
+.plans/
+
 # Rust
 /target/
 /src-tauri/target/
