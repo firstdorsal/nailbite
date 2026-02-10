@@ -359,13 +359,13 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
             // First try palm detection
             match palm_detector.detect(frame) {
                 Ok(palm_result) => {
-                    info!(
+                    debug!(
                         palm_rois = palm_result.hand_rois.len(),
                         detections = palm_result.detections.len(),
                         "Palm detection results"
                     );
                     for (i, (roi, det)) in palm_result.hand_rois.iter().zip(palm_result.detections.iter()).enumerate() {
-                        info!(
+                        debug!(
                             idx = i,
                             score = det.score,
                             cx = det.bbox[0],
@@ -374,7 +374,7 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                         );
                         match hand_landmarker.estimate(frame, roi) {
                             Ok(Some(hand)) => {
-                                info!(
+                                debug!(
                                     idx = i,
                                     side = ?hand.side,
                                     confidence = hand.confidence,
@@ -383,7 +383,7 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                                 raw_hands.push(hand);
                             }
                             Ok(None) => {
-                                info!(idx = i, "Hand landmarker returned None for palm ROI");
+                                debug!(idx = i, "Hand landmarker returned None for palm ROI");
                             }
                             Err(e) => {
                                 warn!(idx = i, error = %e, "Hand landmarker error");
@@ -509,7 +509,7 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
             // Log raw hand positions before tracking
             for (i, h) in raw_hands.iter().enumerate() {
                 let wrist = &h.landmarks[crate::detection::types::WRIST_INDEX];
-                info!(
+                debug!(
                     idx = i,
                     side = ?h.side,
                     confidence = h.confidence,
@@ -527,7 +527,7 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                 tracker.update(raw_hands)
             };
 
-            info!(
+            debug!(
                 camera_id = %camera_id,
                 raw_hands = raw_hand_count,
                 tracked_hands = hands.len(),

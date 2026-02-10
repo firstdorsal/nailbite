@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::detection::types::{HandDetection, HandSide, Landmark, WRIST_INDEX};
 
@@ -240,7 +240,7 @@ impl HandTracker {
                     });
 
                     if can_add {
-                        info!(
+                        debug!(
                             side = "left",
                             wrist_x = wrist.x,
                             confidence = det.confidence,
@@ -256,7 +256,7 @@ impl HandTracker {
                     });
 
                     if can_add {
-                        info!(
+                        debug!(
                             side = "right",
                             wrist_x = wrist.x,
                             confidence = det.confidence,

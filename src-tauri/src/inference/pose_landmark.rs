@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ort::inputs;
 use ort::value::TensorRef;
-use tracing::{debug, info};
+use tracing::{debug, trace};
 
 use crate::detection::types::{Landmark, PoseDetection, PoseLandmark};
 use crate::errors::InferenceError;
@@ -96,7 +96,7 @@ impl PoseLandmarker {
                 .run(inputs![input])
                 .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
-            info!(
+            debug!(
                 num_outputs = outputs.len(),
                 "Pose model outputs"
             );
@@ -119,7 +119,7 @@ impl PoseLandmarker {
 
             // Log first landmark values for debugging
             if lm.len() >= 5 {
-                info!(
+                trace!(
                     lm0_x = lm[0],
                     lm0_y = lm[1],
                     lm0_z = lm[2],
@@ -137,7 +137,7 @@ impl PoseLandmarker {
         let presence = presence_flag.first().copied().unwrap_or(0.0);
         let presence_prob = 1.0 / (1.0 + (-presence).exp());
 
-        info!(
+        debug!(
             raw_presence = presence,
             presence_prob = presence_prob,
             threshold = CONFIDENCE_THRESHOLD,
