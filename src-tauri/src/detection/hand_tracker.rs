@@ -15,7 +15,8 @@ use tracing::debug;
 use crate::detection::types::{HandDetection, HandSide, Landmark, WRIST_INDEX};
 
 /// How long to keep tracking after last detection (grace period).
-const TRACKING_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Longer timeout = more stable but hands persist longer after actually disappearing.
+const TRACKING_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Maximum distance (normalized) for matching a detection to a tracked hand.
 const MAX_MATCH_DISTANCE: f32 = 0.35;
@@ -24,7 +25,8 @@ const MAX_MATCH_DISTANCE: f32 = 0.35;
 const MIN_HAND_SEPARATION: f32 = 0.10;
 
 /// Smoothing factor for landmark updates (0 = no smoothing, 1 = no update).
-const SMOOTHING_ALPHA: f32 = 0.4;
+/// Lower values = smoother/more stable but less responsive.
+const SMOOTHING_ALPHA: f32 = 0.3;
 
 /// A tracked hand.
 #[derive(Debug, Clone)]
@@ -60,7 +62,8 @@ impl TrackedHand {
             old.y = SMOOTHING_ALPHA * new_lm.y + (1.0 - SMOOTHING_ALPHA) * old.y;
             old.z = SMOOTHING_ALPHA * new_lm.z + (1.0 - SMOOTHING_ALPHA) * old.z;
         }
-        self.confidence = detection.confidence;
+        // Smooth confidence to reduce flickering
+        self.confidence = SMOOTHING_ALPHA * detection.confidence + (1.0 - SMOOTHING_ALPHA) * self.confidence;
         self.last_seen = now;
         self.visible = true;
 

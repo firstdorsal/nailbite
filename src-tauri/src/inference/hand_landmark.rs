@@ -15,9 +15,9 @@ use crate::inference::preprocessing::{preprocess_roi, NormalizeRange};
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 224;
-/// Hand presence confidence threshold. Higher values reduce false positives
-/// (detecting non-hands as hands) but may miss some real hands.
-const CONFIDENCE_THRESHOLD: f32 = 0.35;
+/// Hand presence confidence threshold. Balance between false positives
+/// (detecting non-hands) and stability (not flickering on real hands).
+const CONFIDENCE_THRESHOLD: f32 = 0.25;
 
 pub struct HandLandmarker {
     session: Arc<ModelSession>,
