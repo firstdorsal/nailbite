@@ -18,8 +18,9 @@ use crate::inference::preprocessing::{preprocess_frame_letterbox, NormalizeRange
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 192;
-/// Lowered to catch more hands - false positives filtered by hand landmark model.
-const SCORE_THRESHOLD: f32 = 0.15;
+/// Palm detection confidence threshold. Pose wrist detection provides backup
+/// for hands missed by palm detection, so we can use a moderate threshold.
+const SCORE_THRESHOLD: f32 = 0.3;
 /// Increased to allow more overlapping detections - tracker handles duplicates.
 const NMS_THRESHOLD: f32 = 0.5;
 const NUM_KEYPOINTS: usize = 7;
