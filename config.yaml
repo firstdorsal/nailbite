@@ -9,19 +9,45 @@ models:
     hand_landmark: ./models/hand_landmark.onnx
     face_detection: ./models/face_detection.onnx
     face_mesh: ./models/face_mesh.onnx
+    pose_detection: ./models/pose_detection.onnx
+    pose_landmark: ./models/pose_landmark.onnx
 
-cameras:
-    - id: main
-      device: /dev/video0
-      role: full
-      width: 640
-      height: 480
-      fps: 30
-      inference_fps: 8
+# Camera config for V4L2 capture
+# Multiple cameras can be configured; exactly one must be primary
+camera:
+    inference_fps: 8
+    sources:
+        - id: main
+          device: /dev/video0
+          role: primary
+          resolution_width: 640
+          resolution_height: 480
+        # Example: add secondary camera
+        # - id: secondary
+        #   device: /dev/video2
+        #   role: auxiliary
+        #   resolution_width: 640
+        #   resolution_height: 480
 
 ort:
     intra_op_num_threads: 2
     inter_op_num_threads: 1
+    gpu:
+        # auto: try GPU, fall back to CPU
+        # disabled: CPU only
+        # required: fail if no GPU available
+        preference: auto
+        # auto: try TensorRT > CUDA > MIGraphX > ROCm
+        # cuda: NVIDIA CUDA only
+        # tensorrt: NVIDIA TensorRT (falls back to CUDA)
+        # migraphx: AMD MIGraphX only
+        backend: auto
+        # GPU device index (0-7)
+        device_id: 0
+        # Enable FP16 for supported backends
+        fp16_enable: true
+        # Optional memory limit in MB (uncomment to use)
+        # memory_limit_mb: 2048
 
 detection:
     behaviors:
@@ -32,7 +58,8 @@ detection:
             confidence_threshold: 0.3
         nail_picking:
             enabled: true
-            proximity_threshold: 0.15
+            # Increased from 0.15 to be more lenient (hands don't need to be as close)
+            proximity_threshold: 0.25
             min_sustained_ms: 1500
             confidence_threshold: 0.3
         hair_pulling:
@@ -59,14 +86,10 @@ actions:
         file: builtin
         volume: 0.8
         repeat: true
-    notification:
-        enabled: true
     webhook:
         enabled: false
         url: ""
         timeout_ms: 5000
-    popup:
-        enabled: true
 
 exercises:
     selection_strategy: random

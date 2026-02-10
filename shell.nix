@@ -43,12 +43,16 @@ pkgs.mkShell {
     # Audio (rodio/cpal -> alsa-sys)
     alsa-lib
 
-    # System tray (tray-icon -> gtk3 + libappindicator)
+    # Tauri 2 dependencies
     gtk3
     glib
     libayatana-appindicator
+    webkitgtk_4_1
+    glib-networking
+    libsoup_3
+    dbus
 
-    # GUI (eframe/egui -> winit -> wayland + x11)
+    # Display (Tauri uses winit -> wayland + x11)
     wayland
     libxkbcommon
     xorg.libX11
@@ -59,16 +63,33 @@ pkgs.mkShell {
     libGL
     vulkan-loader
 
-    # Global hotkeys (global-hotkey -> libxdo)
+    # Global hotkeys (tauri-plugin-global-shortcut -> libxdo)
     xdotool
 
-    # Camera (v4l)
-    v4l-utils
+    # Node.js for frontend
+    nodejs_22
+    nodePackages.pnpm
+
+    # GStreamer for WebKitGTK camera access (getUserMedia)
+    gst_all_1.gstreamer
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-plugins-ugly
+    gst_all_1.gst-libav
+
+    # PipeWire for modern Linux camera access
+    pipewire
+    wireplumber
+
+    # V4L2 camera capture (linux headers for videodev2.h)
     linuxHeaders
   ];
 
   LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-  BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.linuxHeaders}/include -isystem ${pkgs.glibc.dev}/include";
+
+  # Bindgen needs to find linux headers for V4L2
+  BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.linuxHeaders}/include -I${pkgs.glibc.dev}/include";
 
   LD_LIBRARY_PATH = with pkgs; lib.makeLibraryPath [
     wayland
@@ -83,8 +104,34 @@ pkgs.mkShell {
     libayatana-appindicator
     gtk3
     glib
+    webkitgtk_4_1
+    libsoup_3
     onnxruntime_1_23
   ];
 
   ORT_DYLIB_PATH = "${onnxruntime_1_23}/lib/libonnxruntime.so";
+
+  # GIO modules for HTTPS in WebKitGTK
+  GIO_MODULE_DIR = "${pkgs.glib-networking}/lib/gio/modules";
+
+  # GStreamer plugin paths for WebKitGTK camera access
+  GST_PLUGIN_PATH = with pkgs; lib.makeSearchPath "lib/gstreamer-1.0" [
+    gst_all_1.gstreamer
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
+    gst_all_1.gst-plugins-bad
+    gst_all_1.gst-plugins-ugly
+    gst_all_1.gst-libav
+    pipewire
+  ];
+
+  shellHook = ''
+    echo "Nailbite Tauri development shell"
+    echo ""
+    echo "Commands:"
+    echo "  pnpm install         # Install frontend dependencies"
+    echo "  pnpm tauri dev       # Run in development mode"
+    echo "  pnpm tauri build     # Build for production"
+    echo ""
+  '';
 }

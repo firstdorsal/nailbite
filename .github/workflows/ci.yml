@@ -8,10 +8,44 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pin versions for reproducible builds
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10"
 
 jobs:
-  test:
-    name: Test
+  # Frontend checks (TypeScript, ESLint, Vitest)
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm exec tsc --noEmit
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm test
+
+  # Backend checks (Rust in src-tauri/)
+  backend:
+    name: Backend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,10 +58,14 @@ jobs:
             cmake \
             clang \
             libclang-dev \
-            libasound2-dev \
+            libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libglib2.0-dev \
             libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libasound2-dev \
             libwayland-dev \
             libxkbcommon-dev \
             libx11-dev \
@@ -47,29 +85,57 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Check
+        working-directory: src-tauri
         run: cargo check --all-targets
 
       - name: Clippy
+        working-directory: src-tauri
         run: cargo clippy -- -D warnings
 
       - name: Test
+        working-directory: src-tauri
         run: cargo test
 
+  # Security audits
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Rust audit
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: src-tauri
 
+      # Frontend audit (DEVOPS-16)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm audit
+        run: pnpm audit --audit-level=high
+
+  # Docker build (produces artifacts)
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: test
+    needs: [frontend, backend]
     steps:
       - uses: actions/checkout@v4
 
@@ -80,26 +146,37 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          build-args: PROFILE=release
           tags: nailbite:${{ github.sha }}
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Extract binary
+      - name: Extract artifacts
         run: |
           CONTAINER_ID=$(docker create nailbite:${{ github.sha }})
-          docker cp "${CONTAINER_ID}:/nailbite" ./nailbite
+          mkdir -p dist
+          docker cp "${CONTAINER_ID}:/nailbite" ./dist/nailbite || true
+          docker cp "${CONTAINER_ID}:/bundle" ./dist/ || true
           docker rm "${CONTAINER_ID}"
 
       - name: Verify binary
         run: |
-          file ./nailbite
-          sha256sum ./nailbite
+          if [ -f ./dist/nailbite ]; then
+            file ./dist/nailbite
+            sha256sum ./dist/nailbite
+          fi
+          if [ -d ./dist/bundle ]; then
+            find ./dist/bundle -type f \( -name "*.AppImage" -o -name "*.deb" \) -exec ls -lh {} \;
+          fi
 
-      - name: Upload artifact
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      # Upload artifacts on tags and main branch
+      - name: Upload artifacts
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: nailbite-linux-x86_64
-          path: ./nailbite
+          path: |
+            ./dist/nailbite
+            ./dist/bundle/**/*.AppImage
+            ./dist/bundle/**/*.deb
+          if-no-files-found: warn

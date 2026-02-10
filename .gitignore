@@ -1,7 +1,58 @@
-/target
+# Rust
+/target/
+/src-tauri/target/
+
+# ONNX models (downloaded on first run)
 *.onnx
+/models/
+/src-tauri/models/
+
+# Build artifacts
 results/
 deployment/results/
 deployment/data/
+
+# Tauri build output
+/src-tauri/target/
+
+# Vite build output (rebuilt during tauri build)
+/dist/
+
+# Environment and secrets
 *.env
+.env*
+!.env.example
+
+# Keep config
 !config.yaml
+
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Tauri
+/src-tauri/WixTools/
+/src-tauri/icons/icon.ico
+
+# Temporary files
+*.tmp
+*.bak

@@ -1,33 +1,59 @@
-ARG PROFILE="release"
-ARG SERVICE_NAME="nailbite"
-ARG SERVICE_VERSION="0.1.0"
-ARG BINARY_NAME="nailbite"
+# Nailbite Tauri Build Dockerfile
+#
+# Builds the Tauri desktop application for Linux x86_64.
+# Produces: AppImage, deb, and rpm packages.
+#
+# Usage:
+#   docker build -t nailbite:build .
+#   docker cp $(docker create nailbite:build):/app/target/release/bundle ./bundle
+#
+ARG NODE_VERSION="22"
+ARG RUST_VERSION="1.85.0"
+ARG PNPM_VERSION="10"
 
-# --- Chef builder: Rust + system deps + cargo-chef + sccache ---
-# Pin the Rust image version for reproducible builds.
-FROM rust:1.85.0-bookworm AS chef-builder
-RUN cargo install cargo-chef --locked
-RUN cargo install --locked --no-default-features sccache
+# =============================================================================
+# Stage 1: Base builder with all system dependencies
+# =============================================================================
+FROM node:${NODE_VERSION}-bookworm AS builder-base
+
+ARG RUST_VERSION
+ARG PNPM_VERSION
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain ${RUST_VERSION} && \
+    rm -rf /root/.cargo/registry /root/.cargo/git
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# Install cargo tools for caching
+RUN cargo install cargo-chef --locked && \
+    cargo install --locked --no-default-features sccache
 ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache
-# Disable incremental compilation for reproducible release builds.
 ENV CARGO_INCREMENTAL=0
-# Reproducible timestamps: Unix epoch for deterministic builds.
 ENV SOURCE_DATE_EPOCH=0
 
-# Install all system build dependencies
+# Install system build dependencies for Tauri + Nailbite
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools
     pkg-config \
     cmake \
     clang \
     libclang-dev \
     upx \
-    # Audio (rodio -> ALSA)
-    libasound2-dev \
-    # System tray (tray-icon -> GTK3 + AppIndicator)
+    # Tauri/WebKitGTK dependencies
+    libwebkit2gtk-4.1-dev \
     libgtk-3-dev \
     libglib2.0-dev \
     libayatana-appindicator3-dev \
-    # GUI (eframe/egui -> X11 + Wayland + OpenGL)
+    librsvg2-dev \
+    libsoup-3.0-dev \
+    libjavascriptcoregtk-4.1-dev \
+    # Audio (rodio -> ALSA)
+    libasound2-dev \
+    # GUI/Display (X11 + Wayland + OpenGL)
     libwayland-dev \
     libxkbcommon-dev \
     libx11-dev \
@@ -37,7 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb1-dev \
     libgl-dev \
     libvulkan-dev \
-    # Global hotkeys (global-hotkey -> libxdo)
+    # Global hotkeys (libxdo)
     libxdo-dev \
     # Camera (v4l)
     libv4l-dev \
@@ -46,55 +72,74 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 
-# --- Planner: prepare cargo-chef recipe ---
-FROM chef-builder AS planner
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src src
-RUN cargo chef prepare --recipe-path recipe.json
+# =============================================================================
+# Stage 2: Prepare cargo-chef recipe for Rust dependency caching
+# =============================================================================
+FROM builder-base AS planner
 
+# Copy Tauri backend sources for recipe
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
+COPY src-tauri/src ./src-tauri/src
+COPY src-tauri/build.rs ./src-tauri/
 
-# --- Builder: cook deps + build binary ---
-FROM chef-builder AS builder
-ARG PROFILE
-ARG BINARY_NAME
-WORKDIR /build
+WORKDIR /app/src-tauri
+RUN cargo chef prepare --recipe-path /recipe.json
 
-# Cook dependencies (cached layer)
-COPY --from=planner /build/recipe.json recipe.json
-COPY Cargo.toml Cargo.lock ./
+# =============================================================================
+# Stage 3: Build frontend and backend
+# =============================================================================
+FROM builder-base AS builder
+
+ARG CARGO_FEATURES=""
+
+# ---- Frontend dependencies (cached layer) ----
+COPY package.json pnpm-lock.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# ---- Rust dependencies (cached layer via cargo-chef) ----
+COPY --from=planner /recipe.json /recipe.json
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
+COPY src-tauri/build.rs ./src-tauri/
+
+WORKDIR /app/src-tauri
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo chef cook --recipe-path recipe.json --profile=${PROFILE}
+    cargo chef cook --release --recipe-path /recipe.json ${CARGO_FEATURES}
 
-# Build application
-COPY src src
+# ---- Build frontend ----
+WORKDIR /app
+COPY index.html vite.config.ts tsconfig.json tsconfig.node.json tailwind.config.ts postcss.config.js components.json ./
+COPY src ./src
+RUN pnpm build
+
+# ---- Build Tauri backend ----
+COPY src-tauri ./src-tauri
+WORKDIR /app/src-tauri
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo build --bin ${BINARY_NAME} --profile=${PROFILE}
+    cargo build --release ${CARGO_FEATURES}
 
-# Move binary to predictable location and compress
-RUN if [ "${PROFILE}" = "dev" ]; then \
-      cp /build/target/debug/${BINARY_NAME} /${BINARY_NAME}; \
-    else \
-      cp /build/target/${PROFILE}/${BINARY_NAME} /${BINARY_NAME}; \
-    fi
-# Stripping is handled by Cargo.toml [profile.release] strip = "symbols".
-RUN if [ "${PROFILE}" = "release" ]; then upx --best --lzma /${BINARY_NAME}; fi
+# ---- Build Tauri bundles ----
+WORKDIR /app
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    pnpm tauri build --no-bundle && \
+    pnpm tauri build --bundles appimage,deb
 
+# =============================================================================
+# Stage 4: Export artifacts
+# =============================================================================
+FROM scratch AS export
 
-# --- Export: minimal image with just the binary ---
-# Note: nailbite is a desktop application requiring GTK3, ALSA, X11, etc.
-# at runtime. This stage exists for binary extraction via build.sh,
-# not for running as a container service.
-FROM scratch
-ARG SERVICE_NAME
-ARG SERVICE_VERSION
-ARG BINARY_NAME
-COPY --from=builder /${BINARY_NAME} /nailbite
-LABEL org.opencontainers.image.title="${SERVICE_NAME}"
-LABEL org.opencontainers.image.version="${SERVICE_VERSION}"
-ENTRYPOINT ["/nailbite"]
+# Copy all build artifacts
+COPY --from=builder /app/src-tauri/target/release/nailbite /nailbite
+COPY --from=builder /app/src-tauri/target/release/bundle /bundle
+
+LABEL org.opencontainers.image.title="nailbite"
+LABEL org.opencontainers.image.description="BFRB detection and decoupling exercise system"

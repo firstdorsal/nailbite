@@ -1,11 +1,52 @@
-target/
+# Git
 .git/
-.github/
-models/*.onnx
-*.md
-.claude/
-*.env
-.gitignore
 .gitattributes
-.dockerignore
+.gitignore
+
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+
+# Rust build artifacts
+target/
+src-tauri/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation and planning (keep README for context)
+*.md
+!README.md
+.plans/
+
+# Test files
+coverage/
+.nyc_output/
+
+# Environment files
+*.env
+.env*
+
+# ONNX models (downloaded during build if needed)
+models/
+*.onnx
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Nix
 shell.nix

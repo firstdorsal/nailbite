@@ -1,0 +1,9 @@
+# Rust Toolchain Configuration
+#
+# Pins the Rust version for reproducible builds across all environments.
+# This file is automatically used by rustup when entering the project directory.
+
+[toolchain]
+channel = "1.85.0"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-unknown-linux-gnu"]
