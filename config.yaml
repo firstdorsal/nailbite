@@ -7,15 +7,28 @@ general:
 models:
     palm_detection: ./models/palm_detection.onnx
     hand_landmark: ./models/hand_landmark.onnx
+    # Higher-quality RTMPose-m hand landmarker (256x256 SimCC, trained on
+    # COCO-WholeBody-Hand + OneHand10K + FreiHand + RHD + HALPE). Replaces
+    # the lite model at runtime when present and loadable; the lite model
+    # remains the automatic fallback. Runs on CPU, CUDA, ROCm, MIGraphX.
+    hand_landmark_full: ./models/hand_landmark_full.onnx
+    # Quality preference for hand landmarking:
+    #   auto - use the full model if available, lite otherwise (default)
+    #   lite - always use MediaPipe lite (skips downloading the full model)
+    #   full - require the full model (errors out if unavailable)
+    hand_landmark_quality: auto
     face_detection: ./models/face_detection.onnx
     face_mesh: ./models/face_mesh.onnx
-    pose_detection: ./models/pose_detection.onnx
     pose_landmark: ./models/pose_landmark.onnx
 
 # Camera config for V4L2 capture
 # Multiple cameras can be configured; exactly one must be primary
 camera:
     inference_fps: 8
+    # Preview FPS — frame rate of the live camera display. Independent of
+    # inference. Higher = smoother preview, more bandwidth between Rust and the
+    # webview. Must be >= inference_fps.
+    preview_fps: 24
     sources:
         - id: main
           device: /dev/video0
@@ -30,8 +43,12 @@ camera:
         #   resolution_height: 480
 
 ort:
-    intra_op_num_threads: 2
-    inter_op_num_threads: 1
+    # Bumped from 2: ONNX Runtime parallelizes the heavy matmul ops across
+    # this many threads. With only 2 it leaves a 16-core / 32-thread CPU
+    # 90 %+ idle while inference takes 100+ ms. 8 threads on a Ryzen 7950X
+    # cuts per-frame inference roughly 4×.
+    intra_op_num_threads: 8
+    inter_op_num_threads: 2
     gpu:
         # auto: try GPU, fall back to CPU
         # disabled: CPU only
@@ -75,6 +92,20 @@ detection:
         typing_suppression: true
         chin_rest_suppression: true
         eating_suppression: true
+    # Hand tracking stability parameters
+    tracking:
+        # Frames a hand persists without detection before disappearing (grace period)
+        grace_frames: 3
+        # Consecutive detection frames required before a new hand becomes visible
+        confirmation_frames: 2
+        # EMA smoothing factor for landmarks (1=use new sample as-is, 0=never update).
+        # Higher = less lag, slightly noisier; raised from 0.3 to reduce visible
+        # tracking lag at 8 FPS inference.
+        smoothing_alpha: 0.6
+        # Confidence threshold for accepting a new hand (higher = fewer false positives)
+        new_hand_confidence: 0.30
+        # Confidence threshold for keeping an existing hand (lower = more stable)
+        existing_hand_confidence: 0.15
 
 fusion:
     strategy: any
@@ -103,6 +134,14 @@ hotkeys:
     dismiss_false_positive: F9
     mark_missed_event: F10
     pause_resume: F11
+
+history:
+    enabled: true
+    dir: ~/.local/share/nailbite/history
+    frames_before: 5
+    frames_after: 5
+    annotate_landmarks: true
+    max_events: 100
 
 training:
     save_frames: false

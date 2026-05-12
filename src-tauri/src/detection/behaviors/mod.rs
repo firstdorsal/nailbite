@@ -1,7 +1,7 @@
 pub mod nail_biting;
 pub mod nail_picking;
 
-use crate::detection::types::{BfrbType, FrameAnalysis};
+use crate::detection::types::{BfrbType, DetectionExplanation, FrameAnalysis};
 use std::time::Duration;
 
 /// Trait for implementing BFRB behavior detectors.
@@ -20,7 +20,22 @@ pub trait BehaviorDetector: Send + Sync {
     ///
     /// Returns `None` if insufficient data is available (e.g., no hands detected
     /// for a hand-based detector).
-    fn analyze_frame(&self, analysis: &FrameAnalysis) -> Option<f32>;
+    fn analyze_frame(&self, analysis: &FrameAnalysis) -> Option<f32> {
+        self.analyze_frame_explained(analysis)
+            .map(|(c, _)| c)
+    }
+
+    /// Like `analyze_frame`, but additionally returns the contributing signals
+    /// that led to the confidence value. Used to explain detections to the
+    /// user, persist per-frame state, and feed label-driven threshold tuning.
+    ///
+    /// The default implementation returns an empty explanation alongside
+    /// `analyze_frame`'s value, so existing detectors keep compiling. Real
+    /// detectors should override this and have `analyze_frame` defer to it.
+    fn analyze_frame_explained(
+        &self,
+        analysis: &FrameAnalysis,
+    ) -> Option<(f32, DetectionExplanation)>;
 
     /// Minimum sustained duration before triggering an alert.
     /// Prevents false positives from brief touches.

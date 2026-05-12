@@ -1,0 +1,155 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Validate that tag version matches Cargo.toml version
+  validate:
+    name: Validate Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: ${VERSION}"
+
+      - name: Check tag matches version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION="${{ steps.version.outputs.version }}"
+          if [ "${TAG_VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Tag version (${TAG_VERSION}) does not match Cargo.toml version (${CARGO_VERSION})"
+            exit 1
+          fi
+          echo "Version validated: ${CARGO_VERSION}"
+
+  # Build all GPU variants
+  build:
+    name: Build (${{ matrix.gpu }})
+    runs-on: ubuntu-latest
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [cpu, cuda, tensorrt, rocm, migraphx]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build with build.sh
+        env:
+          GPU_BACKEND: ${{ matrix.gpu == 'cpu' && 'none' || matrix.gpu }}
+          BUILD_MODE: release
+          RENAME_ARTIFACTS: "1"
+          BUILDX_CACHE: gha
+          OUTPUT_DIR: ./dist
+        run: bash build.sh
+
+      - name: List artifacts
+        run: |
+          echo "=== Build artifacts ==="
+          find ./dist -type f | head -50
+          echo ""
+          echo "=== Checksums ==="
+          cat ./dist/SHA256SUMS-*.txt || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nailbite-${{ matrix.gpu }}
+          path: |
+            ./dist/nailbite_*
+            ./dist/bundle/**/*.deb
+            ./dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+
+  # Create GitHub Release with all artifacts
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [validate, build]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          VERSION="${{ needs.validate.outputs.version }}"
+
+          echo "=== Downloaded artifacts ==="
+          find artifacts -type f | head -100
+
+          # Collect all bundle files into release directory
+          find artifacts -type f -name "*.deb" -exec cp {} release/ \;
+
+          # Collect all checksum files and merge them
+          echo "# SHA256 Checksums for Nailbite v${VERSION}" > release/SHA256SUMS.txt
+          echo "" >> release/SHA256SUMS.txt
+          for f in artifacts/*/SHA256SUMS-*.txt artifacts/*/dist/SHA256SUMS-*.txt; do
+            if [ -f "$f" ]; then
+              cat "$f" >> release/SHA256SUMS.txt
+            fi
+          done
+
+          echo "=== Release assets ==="
+          ls -lh release/
+
+          echo "=== Final checksums ==="
+          cat release/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nailbite v${{ needs.validate.outputs.version }}
+          body: |
+            ## Nailbite v${{ needs.validate.outputs.version }}
+
+            ### Downloads
+
+            Choose the Debian package matching your GPU:
+
+            | GPU | Package |
+            |-----|---------|
+            | CPU (no GPU) | `nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.deb` |
+            | NVIDIA CUDA | `nailbite_${{ needs.validate.outputs.version }}_amd64-cuda.deb` |
+            | NVIDIA TensorRT | `nailbite_${{ needs.validate.outputs.version }}_amd64-tensorrt.deb` |
+            | AMD ROCm | `nailbite_${{ needs.validate.outputs.version }}_amd64-rocm.deb` |
+            | AMD MIGraphX | `nailbite_${{ needs.validate.outputs.version }}_amd64-migraphx.deb` |
+
+            ### Verification
+
+            Verify downloads using SHA256 checksums:
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            ### Runtime Requirements
+
+            - **CPU**: No additional requirements
+            - **CUDA/TensorRT**: NVIDIA driver 525+ with CUDA 12.x runtime
+            - **ROCm/MIGraphX**: AMD ROCm 6.0+ runtime
+
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

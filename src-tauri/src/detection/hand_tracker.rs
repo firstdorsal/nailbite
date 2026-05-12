@@ -4,6 +4,9 @@
 //! Provides temporal consistency:
 //! - Consistent left/right hand identity
 //! - Smooth tracking when detection briefly drops
+//! - Grace period to prevent flickering when detection momentarily drops
+//! - Confirmation delay to prevent single-frame false positives
+//! - Confidence hysteresis for stable hand presence
 //! - Filters duplicate detections
 
 #![allow(clippy::indexing_slicing)]
@@ -14,8 +17,8 @@ use tracing::debug;
 
 use crate::detection::types::{HandDetection, HandSide, Landmark, WRIST_INDEX};
 
-/// How long to keep tracking after last detection (grace period).
-/// Longer timeout = more stable but hands persist longer after actually disappearing.
+/// How long to keep tracking after last detection (absolute timeout).
+/// After this duration without any match, the hand slot is fully cleared.
 const TRACKING_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Maximum distance (normalized) for matching a detection to a tracked hand.
@@ -24,9 +27,50 @@ const MAX_MATCH_DISTANCE: f32 = 0.35;
 /// Minimum distance between two hands to consider them distinct.
 const MIN_HAND_SEPARATION: f32 = 0.10;
 
-/// Smoothing factor for landmark updates (0 = no smoothing, 1 = no update).
+/// Default smoothing factor for landmark updates (0 = no smoothing, 1 = no update).
 /// Lower values = smoother/more stable but less responsive.
-const SMOOTHING_ALPHA: f32 = 0.3;
+const DEFAULT_SMOOTHING_ALPHA: f32 = 0.3;
+
+/// Default number of frames a hand persists without detection before going invisible.
+/// At 8 FPS, 3 frames = ~375ms grace period.
+const DEFAULT_GRACE_FRAMES: u8 = 3;
+
+/// Default number of consecutive detection frames required before a new hand becomes visible.
+/// At 8 FPS, 2 frames = ~250ms confirmation delay.
+const DEFAULT_CONFIRMATION_FRAMES: u8 = 2;
+
+/// Default confidence threshold for accepting a NEW hand (higher = more selective).
+const DEFAULT_NEW_HAND_CONFIDENCE: f32 = 0.30;
+
+/// Default confidence threshold for keeping an EXISTING tracked hand (lower = more stable).
+const DEFAULT_EXISTING_HAND_CONFIDENCE: f32 = 0.15;
+
+/// Configuration for hand tracking behavior.
+#[derive(Debug, Clone)]
+pub struct TrackingConfig {
+    /// Smoothing factor for landmark EMA (0 = no smoothing, 1 = no update).
+    pub smoothing_alpha: f32,
+    /// Number of unmatched frames before a hand goes invisible.
+    pub grace_frames: u8,
+    /// Number of consecutive detections required before a new hand becomes visible.
+    pub confirmation_frames: u8,
+    /// Confidence threshold for accepting a new hand.
+    pub new_hand_confidence: f32,
+    /// Confidence threshold for keeping an existing tracked hand.
+    pub existing_hand_confidence: f32,
+}
+
+impl Default for TrackingConfig {
+    fn default() -> Self {
+        Self {
+            smoothing_alpha: DEFAULT_SMOOTHING_ALPHA,
+            grace_frames: DEFAULT_GRACE_FRAMES,
+            confirmation_frames: DEFAULT_CONFIRMATION_FRAMES,
+            new_hand_confidence: DEFAULT_NEW_HAND_CONFIDENCE,
+            existing_hand_confidence: DEFAULT_EXISTING_HAND_CONFIDENCE,
+        }
+    }
+}
 
 /// A tracked hand.
 #[derive(Debug, Clone)]
@@ -39,33 +83,50 @@ pub struct TrackedHand {
     pub confidence: f32,
     /// Last time this hand was detected.
     pub last_seen: Instant,
-    /// Whether this hand is currently visible.
+    /// Whether this hand is currently visible (confirmed and within grace).
     pub visible: bool,
+    /// Number of consecutive frames this hand was NOT matched (for grace period).
+    pub miss_count: u8,
+    /// Number of consecutive frames this hand was detected (for confirmation delay).
+    pub consecutive_detections: u8,
 }
 
 impl TrackedHand {
-    fn new(side: HandSide, detection: HandDetection, now: Instant) -> Self {
+    fn new(side: HandSide, detection: HandDetection, confirmation_frames: u8, now: Instant) -> Self {
+        // First detection counts as 1; visible immediately only if confirmation_frames <= 1
+        let visible = confirmation_frames <= 1;
         Self {
             side,
             smoothed_landmarks: detection.landmarks,
             confidence: detection.confidence,
             last_seen: now,
-            visible: true,
+            visible,
+            miss_count: 0,
+            consecutive_detections: 1,
         }
     }
 
-    fn update(&mut self, detection: HandDetection, now: Instant) {
+    fn update(&mut self, detection: HandDetection, alpha: f32, confirmation_frames: u8, now: Instant) {
+        let one_minus_alpha = 1.0 - alpha;
         // Smooth landmarks
         for (i, new_lm) in detection.landmarks.iter().enumerate() {
             let old = &mut self.smoothed_landmarks[i];
-            old.x = SMOOTHING_ALPHA * new_lm.x + (1.0 - SMOOTHING_ALPHA) * old.x;
-            old.y = SMOOTHING_ALPHA * new_lm.y + (1.0 - SMOOTHING_ALPHA) * old.y;
-            old.z = SMOOTHING_ALPHA * new_lm.z + (1.0 - SMOOTHING_ALPHA) * old.z;
+            old.x = alpha.mul_add(new_lm.x, one_minus_alpha * old.x);
+            old.y = alpha.mul_add(new_lm.y, one_minus_alpha * old.y);
+            old.z = alpha.mul_add(new_lm.z, one_minus_alpha * old.z);
         }
         // Smooth confidence to reduce flickering
-        self.confidence = SMOOTHING_ALPHA * detection.confidence + (1.0 - SMOOTHING_ALPHA) * self.confidence;
+        self.confidence = alpha.mul_add(detection.confidence, one_minus_alpha * self.confidence);
         self.last_seen = now;
-        self.visible = true;
+        self.miss_count = 0;
+
+        // Increment consecutive detections (saturating to avoid overflow)
+        self.consecutive_detections = self.consecutive_detections.saturating_add(1);
+
+        // Confirmation delay: only become visible after enough consecutive detections
+        if self.consecutive_detections >= confirmation_frames {
+            self.visible = true;
+        }
 
         // If detection has a pose-corrected side that differs, log but don't change slot assignment
         // The slot (left/right in HandTracker) determines identity, not this field
@@ -113,6 +174,8 @@ pub struct HandTracker {
     left: Option<TrackedHand>,
     /// Right hand (if tracked).
     right: Option<TrackedHand>,
+    /// Tracking configuration.
+    config: TrackingConfig,
 }
 
 impl HandTracker {
@@ -120,20 +183,26 @@ impl HandTracker {
         Self::default()
     }
 
+    /// Create a hand tracker with custom configuration.
+    pub fn with_config(config: TrackingConfig) -> Self {
+        Self {
+            left: None,
+            right: None,
+            config,
+        }
+    }
+
     /// Update tracking with new detections.
     /// Returns smoothed hand detections.
     pub fn update(&mut self, detections: Vec<HandDetection>) -> Vec<HandDetection> {
         let now = Instant::now();
+        let alpha = self.config.smoothing_alpha;
+        let confirmation_frames = self.config.confirmation_frames;
+        let grace_frames = self.config.grace_frames;
+        let new_hand_confidence = self.config.new_hand_confidence;
+        let existing_hand_confidence = self.config.existing_hand_confidence;
 
-        // Mark hands as not visible
-        if let Some(ref mut h) = self.left {
-            h.visible = false;
-        }
-        if let Some(ref mut h) = self.right {
-            h.visible = false;
-        }
-
-        // Remove expired hands
+        // Remove expired hands (absolute timeout)
         if self.left.as_ref().is_some_and(|h| h.is_expired(now)) {
             debug!("Left hand expired");
             self.left = None;
@@ -151,8 +220,14 @@ impl HandTracker {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Track which detections are used
+        // Filter detections below existing_hand_confidence early
+        // (the lowest threshold we'll ever accept)
+        sorted.retain(|d| d.confidence >= existing_hand_confidence);
+
+        // Track which detections are used and which hands were matched
         let mut used = vec![false; sorted.len()];
+        let mut left_matched = false;
+        let mut right_matched = false;
 
         // Phase 1: Match detections to existing tracked hands
         // When a detection has a pose-corrected side, prefer matching to that side's slot.
@@ -162,12 +237,12 @@ impl HandTracker {
                 continue;
             }
 
-            // Calculate distance to both hands (only consider non-visible slots for matching)
+            // Calculate distance to both hands (only consider unmatched slots)
             let left_dist = self.left.as_ref()
-                .filter(|h| !h.visible)
+                .filter(|_| !left_matched)
                 .map(|h| h.distance_to(det));
             let right_dist = self.right.as_ref()
-                .filter(|h| !h.visible)
+                .filter(|_| !right_matched)
                 .map(|h| h.distance_to(det));
 
             // If detection has a pose-corrected side, prefer that side
@@ -176,8 +251,9 @@ impl HandTracker {
                     HandSide::Left => {
                         if let Some(ld) = left_dist {
                             if ld < MAX_MATCH_DISTANCE {
-                                self.left.as_mut().unwrap().update(det.clone(), now);
+                                self.left.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                                 used[i] = true;
+                                left_matched = true;
                                 debug!(side = "left", distance = ld, pose_corrected = true, "Matched to pose-preferred side");
                                 continue;
                             }
@@ -186,8 +262,9 @@ impl HandTracker {
                     HandSide::Right => {
                         if let Some(rd) = right_dist {
                             if rd < MAX_MATCH_DISTANCE {
-                                self.right.as_mut().unwrap().update(det.clone(), now);
+                                self.right.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                                 used[i] = true;
+                                right_matched = true;
                                 debug!(side = "right", distance = rd, pose_corrected = true, "Matched to pose-preferred side");
                                 continue;
                             }
@@ -207,8 +284,9 @@ impl HandTracker {
                                     distance = rd,
                                     "Cross-matching due to slot unavailability"
                                 );
-                                self.right.as_mut().unwrap().update(det.clone(), now);
+                                self.right.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                                 used[i] = true;
+                                right_matched = true;
                             }
                         }
                     }
@@ -221,8 +299,9 @@ impl HandTracker {
                                     distance = ld,
                                     "Cross-matching due to slot unavailability"
                                 );
-                                self.left.as_mut().unwrap().update(det.clone(), now);
+                                self.left.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                                 used[i] = true;
+                                left_matched = true;
                             }
                         }
                     }
@@ -234,32 +313,70 @@ impl HandTracker {
             match (left_dist, right_dist) {
                 (Some(ld), Some(rd)) => {
                     if ld <= rd && ld < MAX_MATCH_DISTANCE {
-                        self.left.as_mut().unwrap().update(det.clone(), now);
+                        self.left.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                         used[i] = true;
+                        left_matched = true;
                         debug!(side = "left", distance = ld, "Matched to closest hand");
                     } else if rd < ld && rd < MAX_MATCH_DISTANCE {
-                        self.right.as_mut().unwrap().update(det.clone(), now);
+                        self.right.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                         used[i] = true;
+                        right_matched = true;
                         debug!(side = "right", distance = rd, "Matched to closest hand");
                     }
                 }
                 (Some(ld), None) if ld < MAX_MATCH_DISTANCE => {
-                    self.left.as_mut().unwrap().update(det.clone(), now);
+                    self.left.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                     used[i] = true;
+                    left_matched = true;
                     debug!(side = "left", distance = ld, "Matched to left hand");
                 }
                 (None, Some(rd)) if rd < MAX_MATCH_DISTANCE => {
-                    self.right.as_mut().unwrap().update(det.clone(), now);
+                    self.right.as_mut().unwrap().update(det.clone(), alpha, confirmation_frames, now);
                     used[i] = true;
+                    right_matched = true;
                     debug!(side = "right", distance = rd, "Matched to right hand");
                 }
                 _ => {}
             }
         }
 
+        // Grace period: handle unmatched hands
+        // Instead of immediately going invisible, increment miss_count and keep
+        // visibility during grace period, returning stale smoothed landmarks.
+        if !left_matched {
+            if let Some(ref mut h) = self.left {
+                h.miss_count = h.miss_count.saturating_add(1);
+                if h.miss_count > grace_frames {
+                    h.visible = false;
+                    h.consecutive_detections = 0;
+                }
+                // During grace period, visible stays as-is (preserving previous state)
+            }
+        }
+        if !right_matched {
+            if let Some(ref mut h) = self.right {
+                h.miss_count = h.miss_count.saturating_add(1);
+                if h.miss_count > grace_frames {
+                    h.visible = false;
+                    h.consecutive_detections = 0;
+                }
+            }
+        }
+
         // Phase 2: Add unmatched detections as new hands
+        // Apply higher confidence threshold for new hands (hysteresis)
         for (i, det) in sorted.iter().enumerate() {
             if used[i] {
+                continue;
+            }
+
+            // New hands require higher confidence to prevent flickering
+            if det.confidence < new_hand_confidence {
+                debug!(
+                    confidence = det.confidence,
+                    threshold = new_hand_confidence,
+                    "New hand rejected: confidence below new-hand threshold"
+                );
                 continue;
             }
 
@@ -321,9 +438,9 @@ impl HandTracker {
                             side = "left",
                             wrist_x = wrist.x,
                             confidence = det.confidence,
-                            "Added new hand"
+                            "Added new hand (pending confirmation)"
                         );
-                        self.left = Some(TrackedHand::new(side, det.clone(), now));
+                        self.left = Some(TrackedHand::new(side, det.clone(), confirmation_frames, now));
                         used[i] = true;
                     }
                 }
@@ -337,9 +454,9 @@ impl HandTracker {
                             side = "right",
                             wrist_x = wrist.x,
                             confidence = det.confidence,
-                            "Added new hand"
+                            "Added new hand (pending confirmation)"
                         );
-                        self.right = Some(TrackedHand::new(side, det.clone(), now));
+                        self.right = Some(TrackedHand::new(side, det.clone(), confirmation_frames, now));
                         used[i] = true;
                     }
                 }
@@ -384,6 +501,31 @@ impl HandTracker {
             && self.right.as_ref().is_some_and(|h| h.visible)
     }
 
+    /// Get the tracking config (for telemetry).
+    pub fn config(&self) -> &TrackingConfig {
+        &self.config
+    }
+
+    /// Get miss count for left hand (for telemetry).
+    pub fn left_miss_count(&self) -> Option<u8> {
+        self.left.as_ref().map(|h| h.miss_count)
+    }
+
+    /// Get miss count for right hand (for telemetry).
+    pub fn right_miss_count(&self) -> Option<u8> {
+        self.right.as_ref().map(|h| h.miss_count)
+    }
+
+    /// Get consecutive detections for left hand (for telemetry).
+    pub fn left_consecutive_detections(&self) -> Option<u8> {
+        self.left.as_ref().map(|h| h.consecutive_detections)
+    }
+
+    /// Get consecutive detections for right hand (for telemetry).
+    pub fn right_consecutive_detections(&self) -> Option<u8> {
+        self.right.as_ref().map(|h| h.consecutive_detections)
+    }
+
     /// Clear all tracking state.
     pub fn clear(&mut self) {
         self.left = None;
@@ -411,9 +553,45 @@ mod tests {
         }
     }
 
+    /// Helper: create a tracker with confirmation_frames=1 for legacy tests
+    /// that expect immediate visibility (like the original behavior).
+    fn immediate_tracker() -> HandTracker {
+        HandTracker::with_config(TrackingConfig {
+            confirmation_frames: 1,
+            ..TrackingConfig::default()
+        })
+    }
+
+    #[test]
+    fn new_hand_not_immediately_visible() {
+        let mut tracker = HandTracker::new(); // default: confirmation_frames=2
+
+        let det = make_hand(0.3, 0.5, None, 0.9);
+        let result = tracker.update(vec![det]);
+
+        // First frame: hand should not yet be visible (needs confirmation)
+        assert_eq!(result.len(), 0, "New hand should not be visible on first frame");
+    }
+
+    #[test]
+    fn new_hand_visible_after_confirmation() {
+        let mut tracker = HandTracker::new(); // default: confirmation_frames=2
+
+        let det = make_hand(0.3, 0.5, None, 0.9);
+
+        // Frame 1: not visible yet
+        let result1 = tracker.update(vec![det.clone()]);
+        assert_eq!(result1.len(), 0);
+
+        // Frame 2: confirmed, now visible
+        let result2 = tracker.update(vec![det]);
+        assert_eq!(result2.len(), 1);
+        assert!(result2[0].side.is_some());
+    }
+
     #[test]
     fn tracks_single_hand() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         let det = make_hand(0.3, 0.5, None, 0.9);
         let result = tracker.update(vec![det]);
@@ -424,11 +602,11 @@ mod tests {
 
     #[test]
     fn tracks_two_hands() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         let left = make_hand(0.6, 0.5, None, 0.9);
         let right = make_hand(0.3, 0.5, None, 0.9);
-        let result = tracker.update(vec![left, right]);
+        let result = tracker.update(vec![left.clone(), right.clone()]);
 
         assert_eq!(result.len(), 2);
         assert!(tracker.has_two_hands());
@@ -436,7 +614,7 @@ mod tests {
 
     #[test]
     fn maintains_identity_across_frames() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         // Frame 1
         let det1 = make_hand(0.3, 0.5, None, 0.9);
@@ -452,7 +630,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_same_position() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         let det1 = make_hand(0.5, 0.5, None, 0.9);
         let det2 = make_hand(0.51, 0.51, None, 0.8);
@@ -463,7 +641,7 @@ mod tests {
 
     #[test]
     fn accepts_both_hands_when_model_misclassifies() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         // Model says both are Left, but they're clearly different hands
         let hand1 = make_hand(0.6, 0.5, Some(HandSide::Left), 0.9);
@@ -480,7 +658,7 @@ mod tests {
 
     #[test]
     fn maintains_side_when_model_flips() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         // Frame 1: Hand detected
         let det1 = make_hand(0.4, 0.5, Some(HandSide::Right), 0.9);
@@ -495,19 +673,42 @@ mod tests {
     }
 
     #[test]
+    fn hand_persists_during_grace_period() {
+        let mut tracker = immediate_tracker(); // grace_frames=3
+
+        // Frame 1: Hand detected and confirmed
+        let det = make_hand(0.5, 0.5, Some(HandSide::Left), 0.9);
+        let result1 = tracker.update(vec![det]);
+        assert_eq!(result1.len(), 1);
+
+        // Frames 2-4: No detection — hand should persist during grace period
+        for frame in 2..=4 {
+            let result = tracker.update(vec![]);
+            assert_eq!(result.len(), 1, "Hand should persist during grace frame {frame}");
+        }
+
+        // Frame 5: No detection — grace period exceeded, hand should disappear
+        let result5 = tracker.update(vec![]);
+        assert_eq!(result5.len(), 0, "Hand should disappear after grace period");
+    }
+
+    #[test]
     fn revives_invisible_hand() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         // Frame 1: Hand detected
         let det1 = make_hand(0.5, 0.5, Some(HandSide::Left), 0.9);
         let result1 = tracker.update(vec![det1]);
         assert_eq!(result1.len(), 1);
 
-        // Frame 2: No detection
-        let result2 = tracker.update(vec![]);
-        assert_eq!(result2.len(), 0);
+        // Frames 2-5: No detection — exhaust grace period
+        for _ in 0..4 {
+            tracker.update(vec![]);
+        }
+        let result_gone = tracker.update(vec![]);
+        assert_eq!(result_gone.len(), 0, "Hand should be gone after grace");
 
-        // Frame 3: Hand back
+        // Frame 6: Hand back in same area — should match to existing slot
         let det3 = make_hand(0.52, 0.52, Some(HandSide::Right), 0.9);
         let result3 = tracker.update(vec![det3]);
         assert_eq!(result3.len(), 1);
@@ -517,7 +718,7 @@ mod tests {
 
     #[test]
     fn hands_far_apart_still_tracked() {
-        let mut tracker = HandTracker::new();
+        let mut tracker = immediate_tracker();
 
         // Hands very far apart (like arms spread wide)
         let left = make_hand(0.1, 0.5, None, 0.9);
@@ -526,5 +727,66 @@ mod tests {
 
         assert_eq!(result.len(), 2, "Should track both hands even far apart");
         assert!(tracker.has_two_hands());
+    }
+
+    #[test]
+    fn single_frame_false_positive_blocked() {
+        let mut tracker = HandTracker::new(); // default: confirmation_frames=2
+
+        // Frame 1: Hand appears
+        let det = make_hand(0.5, 0.5, None, 0.9);
+        let result1 = tracker.update(vec![det]);
+        assert_eq!(result1.len(), 0, "Not confirmed yet");
+
+        // Frame 2: Hand disappears — single frame spike
+        let result2 = tracker.update(vec![]);
+        assert_eq!(result2.len(), 0, "Single frame detection should not appear");
+    }
+
+    #[test]
+    fn existing_hand_survives_low_confidence() {
+        // Once a hand is confirmed, it should survive at lower confidence
+        // (hysteresis: existing_hand_confidence=0.15 < new_hand_confidence=0.30)
+        let mut tracker = immediate_tracker();
+
+        // Frame 1: High confidence hand confirmed
+        let det1 = make_hand(0.5, 0.5, None, 0.9);
+        let result1 = tracker.update(vec![det1]);
+        assert_eq!(result1.len(), 1);
+
+        // Frame 2: Same hand at low confidence (0.20 — below new_hand but above existing_hand)
+        let det2 = make_hand(0.51, 0.51, None, 0.20);
+        let result2 = tracker.update(vec![det2]);
+        assert_eq!(result2.len(), 1, "Existing hand should survive at low confidence");
+    }
+
+    #[test]
+    fn new_hand_rejected_at_low_confidence() {
+        let mut tracker = immediate_tracker();
+
+        // Try to add a new hand at confidence below new_hand_confidence (0.30)
+        let det = make_hand(0.5, 0.5, None, 0.20);
+        let result = tracker.update(vec![det]);
+        assert_eq!(result.len(), 0, "New hand should be rejected at low confidence");
+    }
+
+    #[test]
+    fn grace_period_revives_with_confirmation_bypass() {
+        // A hand that was previously confirmed should not need re-confirmation
+        // after a brief gap within the grace period
+        let mut tracker = immediate_tracker(); // grace_frames=3
+
+        // Frame 1: Hand confirmed
+        let det = make_hand(0.5, 0.5, None, 0.9);
+        let result1 = tracker.update(vec![det.clone()]);
+        assert_eq!(result1.len(), 1);
+
+        // Frame 2: No detection (miss_count=1, still in grace)
+        let result2 = tracker.update(vec![]);
+        assert_eq!(result2.len(), 1, "Should persist in grace");
+
+        // Frame 3: Hand back — should immediately be visible (already confirmed)
+        let result3 = tracker.update(vec![make_hand(0.51, 0.51, None, 0.9)]);
+        assert_eq!(result3.len(), 1, "Should be immediately visible after grace match");
     }
 }

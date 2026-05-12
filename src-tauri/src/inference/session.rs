@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::config::OrtConfig;
+use crate::config::{GraphOptimization, HandLandmarkQuality, OrtConfig};
 use crate::errors::InferenceError;
 
 use super::execution_provider::{build_execution_providers, ActiveProvider};
@@ -40,9 +40,16 @@ impl ModelSession {
         // Build execution providers based on GPU config
         let (providers, expected_provider) = build_execution_providers(&ort_config.gpu)?;
 
+        let opt_level = match ort_config.graph_optimization {
+            GraphOptimization::Disabled => GraphOptimizationLevel::Disable,
+            GraphOptimization::Basic => GraphOptimizationLevel::Level1,
+            GraphOptimization::Extended => GraphOptimizationLevel::Level2,
+            GraphOptimization::All => GraphOptimizationLevel::Level3,
+        };
+
         let mut builder = Session::builder()
             .map_err(|e| InferenceError::Ort(e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .with_optimization_level(opt_level)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .with_intra_threads(ort_config.intra_op_num_threads as usize)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
@@ -103,9 +110,12 @@ impl ModelSession {
 pub struct ModelSessions {
     pub palm_detection: Arc<ModelSession>,
     pub hand_landmark: Arc<ModelSession>,
+    /// Optional RTMPose-m hand landmark session. Present when the
+    /// higher-quality model has been downloaded and successfully loaded.
+    /// `None` means the runtime is using the MediaPipe lite fallback.
+    pub hand_landmark_full: Option<Arc<ModelSession>>,
     pub face_detection: Arc<ModelSession>,
     pub face_mesh: Arc<ModelSession>,
-    pub pose_detection: Arc<ModelSession>,
     pub pose_landmark: Arc<ModelSession>,
 }
 
@@ -120,21 +130,59 @@ impl ModelSessions {
         let hand_landmark = Arc::new(ModelSession::new(&models.hand_landmark, ort_config)?);
         let face_detection = Arc::new(ModelSession::new(&models.face_detection, ort_config)?);
         let face_mesh = Arc::new(ModelSession::new(&models.face_mesh, ort_config)?);
-        let pose_detection = Arc::new(ModelSession::new(&models.pose_detection, ort_config)?);
         let pose_landmark = Arc::new(ModelSession::new(&models.pose_landmark, ort_config)?);
+
+        let hand_landmark_full = match models.hand_landmark_quality {
+            HandLandmarkQuality::Lite => None,
+            HandLandmarkQuality::Auto => {
+                if models.hand_landmark_full.exists() {
+                    match ModelSession::new(&models.hand_landmark_full, ort_config) {
+                        Ok(s) => {
+                            info!(
+                                path = %models.hand_landmark_full.display(),
+                                "RTMPose hand landmark model loaded"
+                            );
+                            Some(Arc::new(s))
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "Failed to load RTMPose hand model; falling back to MediaPipe lite"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    info!(
+                        path = %models.hand_landmark_full.display(),
+                        "RTMPose hand landmark model not on disk; using MediaPipe lite"
+                    );
+                    None
+                }
+            }
+            HandLandmarkQuality::Full => {
+                let s = ModelSession::new(&models.hand_landmark_full, ort_config)?;
+                info!(
+                    path = %models.hand_landmark_full.display(),
+                    "RTMPose hand landmark model loaded (strict mode)"
+                );
+                Some(Arc::new(s))
+            }
+        };
 
         // Log active provider (all sessions should use the same provider)
         info!(
             provider = %palm_detection.active_provider(),
+            high_quality_hand = hand_landmark_full.is_some(),
             "All model sessions loaded successfully"
         );
 
         Ok(Self {
             palm_detection,
             hand_landmark,
+            hand_landmark_full,
             face_detection,
             face_mesh,
-            pose_detection,
             pose_landmark,
         })
     }

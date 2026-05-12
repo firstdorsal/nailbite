@@ -111,6 +111,86 @@ pub struct DetectionEvent {
     pub started_at: Instant,
     pub duration: Duration,
     pub camera_id: String,
+    /// Snapshot of the detector signals at the highest-confidence frame in
+    /// the accumulation window. Used to explain *why* the alert fired.
+    /// `None` when not produced (e.g. legacy callers / tests).
+    pub explanation: Option<DetectionExplanation>,
+}
+
+/// Why a detector ignored or short-circuited a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionReason {
+    /// Detector requires a face but none was visible.
+    NoFace,
+    /// Detector requires hands but none were visible.
+    NoHands,
+    /// Hands were in a typing posture; behavior unlikely.
+    TypingPosture,
+    /// Hand was resting on the chin (extended fingers near face but not at mouth).
+    ChinRest,
+    /// Inter-hand check needs at least two hands.
+    InsufficientHands,
+}
+
+/// Per-hand contribution to a detector's confidence on a single frame.
+///
+/// Designed to be common across nail-biting and nail-picking so the frontend
+/// can render one explanation widget. Detector-specific values use `None`
+/// when not applicable (e.g. `curl` is biting-only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandSignal {
+    /// Index into the detector's input hand list.
+    pub hand_index: usize,
+    /// Identified hand side, when known.
+    pub side: Option<HandSide>,
+    /// Distance used by the detector, normalized to a unit-free scale
+    /// (face width for biting, hand scale for picking).
+    pub normalized_distance: f32,
+    /// Threshold this distance was checked against. The hand contributed only
+    /// when `normalized_distance < distance_threshold`.
+    pub distance_threshold: f32,
+    /// Fingertip landmark index that produced `normalized_distance`
+    /// (one of `FINGERTIP_INDICES`). `None` when not meaningful.
+    pub contributing_fingertip: Option<usize>,
+    /// For nail-picking same-hand and inter-hand: the partner fingertip index.
+    pub partner_fingertip: Option<usize>,
+    /// Finger curl ratio [0, 1] — biting only.
+    pub curl: Option<f32>,
+    /// Bonus added on top of proximity (e.g. pinch bonus for picking).
+    pub bonus: f32,
+    /// This hand's contribution to the detector's frame confidence.
+    pub confidence: f32,
+}
+
+/// Full explanation of a detector's decision on a single frame.
+///
+/// Produced by `BehaviorDetector::analyze_frame_explained`. Persisted into
+/// `event.json`, sent over IPC for live signal display, and used by the
+/// label-driven threshold analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectionExplanation {
+    pub bfrb_type: BfrbType,
+    /// Per-hand contributions considered by the detector this frame.
+    /// May be empty when a suppression fired or no hands were visible.
+    pub hands: Vec<HandSignal>,
+    /// Suppressions that fired this frame.
+    pub suppressions: Vec<SuppressionReason>,
+    /// Maximum per-hand confidence (matches the value returned by
+    /// `analyze_frame`).
+    pub frame_confidence: f32,
+}
+
+impl DetectionExplanation {
+    #[must_use]
+    pub fn empty(bfrb_type: BfrbType) -> Self {
+        Self {
+            bfrb_type,
+            hands: Vec::new(),
+            suppressions: Vec::new(),
+            frame_confidence: 0.0,
+        }
+    }
 }
 
 /// Fingertip landmark indices in the MediaPipe hand model (21 landmarks).

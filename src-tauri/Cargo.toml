@@ -76,10 +76,12 @@ base64 = "0.22"
 
 # Fast mutex for hot path
 parking_lot = "0.12.3"
+notify-rust = "4.17.0"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # WebKitGTK for Linux media permissions
 [target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk = "2.0"
+webkit2gtk = { version = "2.0", features = ["v2_16"] }
 v4l = "0.14"
 
 [profile.release]

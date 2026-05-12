@@ -162,39 +162,58 @@ pub fn finger_extension_ratio(hand: &HandDetection) -> f32 {
     }
 }
 
-/// Detect typing posture: both hands at similar Y level with fingers extended downward.
+/// Detect typing posture: both hands spread on a keyboard at similar Y, with
+/// fingers extended downward and NOT touching across hands.
 ///
-/// Returns true if the posture looks like typing (both hands spread, similar height).
+/// We require horizontal separation between wrists and an inter-hand
+/// fingertip gap because nail picking ALSO has both hands at similar Y with
+/// extended fingers — the discriminator is that picking brings the hands
+/// together while typing keeps them apart. Without these checks the
+/// nail-picking detector gets suppressed whenever both hands are visible.
 pub fn is_typing_posture(hands: &[HandDetection]) -> bool {
     if hands.len() < 2 {
         return false;
     }
 
-    // Check that both hands have most fingers extended.
+    // Both hands must have most fingers extended downward.
     let extensions: Vec<f32> = hands.iter().map(finger_extension_ratio).collect();
     let both_extended = extensions.iter().all(|&ext| ext >= 0.5);
     if !both_extended {
         return false;
     }
 
-    // Check that hands are at similar Y level (within 10% of frame height).
-    let y_values: Vec<f32> = hands
-        .iter()
-        .filter_map(|h| h.landmarks.get(WRIST_INDEX).map(|w| w.y))
-        .collect();
+    let Some(w0) = hands.first().and_then(|h| h.landmarks.get(WRIST_INDEX)) else {
+        return false;
+    };
+    let Some(w1) = hands.get(1).and_then(|h| h.landmarks.get(WRIST_INDEX)) else {
+        return false;
+    };
 
-    if y_values.len() < 2 {
+    // Wrists at similar Y level (within 10% of frame height).
+    if (w0.y - w1.y).abs() >= 0.10 {
         return false;
     }
 
-    let Some(&y0) = y_values.first() else {
+    // Wrists horizontally separated (typical keyboard span ≥ ~20% of frame
+    // width). Picking brings hands close horizontally; typing keeps them
+    // apart on the home row.
+    if (w0.x - w1.x).abs() < 0.20 {
         return false;
-    };
-    let Some(&y1) = y_values.get(1) else {
-        return false;
-    };
+    }
 
-    (y0 - y1).abs() < 0.10
+    // Fingertips must NOT be touching across hands — picking has at least
+    // one fingertip pair within ~10% of frame width, typing never does.
+    if let Some(hand0) = hands.first() {
+        if let Some(hand1) = hands.get(1) {
+            if let Some((dist, _, _)) = min_inter_hand_fingertip_distance(hand0, hand1) {
+                if dist < 0.10 {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
 
 /// Detect chin rest posture: wrist/palm near face with fingers NOT at mouth.

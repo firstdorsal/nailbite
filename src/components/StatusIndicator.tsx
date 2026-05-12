@@ -6,6 +6,11 @@ interface StatusIndicatorProps {
   status: Status;
   className?: string;
   showLabel?: boolean;
+  /**
+   * Optional detection-count badge rendered to the right of the status dot.
+   * When `undefined` or `null`, no badge is shown. Pass `0` to render "0".
+   */
+  count?: number | null;
 }
 
 const statusConfig: Record<
@@ -38,12 +43,18 @@ export function StatusIndicator({
   status,
   className,
   showLabel = true,
+  count,
 }: StatusIndicatorProps) {
   const config = statusConfig[status];
+  const showCount = typeof count === "number";
+  // Slightly larger than the empty dot so the digits actually fit. We
+  // keep the dot small (h-3 w-3) when no count is shown so the layout
+  // matches the rest of the UI's existing rhythm.
+  const dotSize = showCount ? "h-5 w-5" : "h-3 w-3";
 
   return (
     <div className={cn("flex items-center gap-2", className)}>
-      <span className="relative flex h-3 w-3">
+      <span className={cn("relative flex items-center justify-center", dotSize)}>
         {config.pulse && (
           <span
             className={cn(
@@ -54,10 +65,22 @@ export function StatusIndicator({
         )}
         <span
           className={cn(
-            "relative inline-flex h-3 w-3 rounded-full",
-            config.color
+            "relative inline-flex items-center justify-center rounded-full",
+            dotSize,
+            config.color,
           )}
-        />
+          title={
+            showCount
+              ? `${count} detection${count === 1 ? "" : "s"} today`
+              : undefined
+          }
+        >
+          {showCount && (
+            <span className="text-[10px] font-bold leading-none tabular-nums text-white">
+              {count}
+            </span>
+          )}
+        </span>
       </span>
       {showLabel && (
         <span className="text-sm font-medium text-muted-foreground">

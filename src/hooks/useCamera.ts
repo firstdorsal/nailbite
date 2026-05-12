@@ -1,7 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import type { HandDetection, FaceDetection, PoseDetection } from "@/types";
+import type {
+  HandDetection,
+  FaceDetection,
+  PoseDetection,
+  DetectionExplanation,
+} from "@/types";
 
 interface FrameUpdateEvent {
   camera_id: string;
@@ -16,7 +21,10 @@ interface FrameUpdateEvent {
     bfrb_type: string;
     confidence: number;
     timestamp: string;
+    explanation?: DetectionExplanation | null;
+    event_id?: string | null;
   }>;
+  current_signals: DetectionExplanation[];
   alert_active: boolean;
   paused: boolean;
   timestamp_ms: number;
@@ -32,6 +40,8 @@ export interface CameraState {
   hands: HandDetection[];
   face: FaceDetection | null;
   pose: PoseDetection | null;
+  /** Per-detector signals for the most recent frame (live "why" data). */
+  currentSignals: DetectionExplanation[];
   timestampMs: number;
 }
 
@@ -133,6 +143,7 @@ export function useCamera(options: UseCameraOptions = {}): UseCameraResult {
             hands: data.hands,
             face: data.face,
             pose: data.pose,
+            currentSignals: data.current_signals ?? [],
             timestampMs: data.timestamp_ms,
           });
           return next;
@@ -183,19 +194,30 @@ export function useCamera(options: UseCameraOptions = {}): UseCameraResult {
     }
   }, []);
 
-  // Auto-start when enabled changes
+  // Auto-start frame listener when enabled. The backend `start_camera`
+  // command is idempotent and is also kicked off at app mount in App.tsx,
+  // so detection keeps running even when this hook unmounts (e.g. user
+  // navigates away from the Preview tab). We deliberately do NOT stop the
+  // camera on unmount — only when the user explicitly disables it.
   useEffect(() => {
     if (enabled) {
       startCamera();
     } else {
       stopCamera();
     }
-
-    return () => {
-      stopCamera();
-    };
     // startCamera and stopCamera are stable due to empty deps (TECH-6)
   }, [enabled, startCamera, stopCamera]);
+
+  // Drop the listener (but not the backend camera) on unmount so the page
+  // stops accumulating frame events when it's not visible.
+  useEffect(() => {
+    return () => {
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+    };
+  }, []);
 
   // Find primary camera
   const primaryCamera =

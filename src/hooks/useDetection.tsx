@@ -1,14 +1,28 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
+import type { DetectionExplanation } from "@/types";
 
 interface DetectionState {
   alertActive: boolean;
   paused: boolean;
   currentBfrb: string | null;
   currentConfidence: number | null;
+  currentExplanation: DetectionExplanation | null;
+  /** Detections confirmed so far today (local time). */
+  todayCount: number;
+  /**
+   * Monotonic counter bumped whenever the alert is resolved out-of-band
+   * (e.g. via the desktop notification's verdict buttons). The
+   * AlertModal watches this so it can close immediately instead of
+   * waiting out its 12 s linger window — the user already decided.
+   */
+  externalResolveSignal: number;
   setAlertActive: (active: boolean) => void;
   setPaused: (paused: boolean) => void;
   setCurrentBfrb: (bfrb: string | null) => void;
   setCurrentConfidence: (confidence: number | null) => void;
+  setCurrentExplanation: (explanation: DetectionExplanation | null) => void;
+  setTodayCount: (count: number) => void;
+  bumpExternalResolveSignal: () => void;
 }
 
 const DetectionContext = createContext<DetectionState | undefined>(undefined);
@@ -35,6 +49,12 @@ export function DetectionProvider({ children }: { children: ReactNode }) {
   const [currentConfidence, setCurrentConfidence] = useState<number | null>(
     null
   );
+  const [currentExplanation, setCurrentExplanation] =
+    useState<DetectionExplanation | null>(null);
+  const [todayCount, setTodayCount] = useState(0);
+  const [externalResolveSignal, setExternalResolveSignal] = useState(0);
+  const bumpExternalResolveSignal = () =>
+    setExternalResolveSignal((n) => n + 1);
 
   return (
     <DetectionContext.Provider
@@ -43,10 +63,16 @@ export function DetectionProvider({ children }: { children: ReactNode }) {
         paused,
         currentBfrb,
         currentConfidence,
+        currentExplanation,
+        todayCount,
+        externalResolveSignal,
         setAlertActive,
         setPaused,
         setCurrentBfrb,
         setCurrentConfidence,
+        setCurrentExplanation,
+        setTodayCount,
+        bumpExternalResolveSignal,
       }}
     >
       {children}

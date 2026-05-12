@@ -3,6 +3,8 @@
 //! Handles runtime detection of GPU availability and constructs the
 //! appropriate execution provider chain with fallback to CPU.
 
+#[cfg(any(feature = "cuda", feature = "tensorrt", feature = "migraphx", feature = "rocm"))]
+use ort::execution_providers::ExecutionProvider;
 use tracing::{info, warn};
 
 use crate::config::{GpuBackend, GpuConfig, GpuPreference};
@@ -184,7 +186,7 @@ fn try_build_cuda(
 
     let cuda = CUDAExecutionProvider::default();
 
-    if !cuda.is_available() {
+    if !cuda.is_available().unwrap_or(false) {
         warn!("CUDA execution provider not available (missing CUDA libraries or GPU)");
         return None;
     }
@@ -210,7 +212,7 @@ fn try_build_tensorrt(
 
     let trt = TensorRTExecutionProvider::default();
 
-    if !trt.is_available() {
+    if !trt.is_available().unwrap_or(false) {
         warn!("TensorRT execution provider not available");
         return None;
     }
@@ -235,7 +237,7 @@ fn try_build_migraphx(
 
     let migraphx = MIGraphXExecutionProvider::default();
 
-    if !migraphx.is_available() {
+    if !migraphx.is_available().unwrap_or(false) {
         warn!("MIGraphX execution provider not available (missing ROCm or AMD GPU)");
         return None;
     }
@@ -260,7 +262,7 @@ fn try_build_rocm(
 
     let rocm = ROCmExecutionProvider::default();
 
-    if !rocm.is_available() {
+    if !rocm.is_available().unwrap_or(false) {
         warn!("ROCm execution provider not available");
         return None;
     }
@@ -285,28 +287,28 @@ pub fn detect_available_gpus() -> Vec<(ActiveProvider, bool)> {
     #[cfg(feature = "tensorrt")]
     {
         use ort::execution_providers::TensorRTExecutionProvider;
-        let available = TensorRTExecutionProvider::default().is_available();
+        let available = TensorRTExecutionProvider::default().is_available().unwrap_or(false);
         results.push((ActiveProvider::TensorRt, available));
     }
 
     #[cfg(feature = "cuda")]
     {
         use ort::execution_providers::CUDAExecutionProvider;
-        let available = CUDAExecutionProvider::default().is_available();
+        let available = CUDAExecutionProvider::default().is_available().unwrap_or(false);
         results.push((ActiveProvider::Cuda, available));
     }
 
     #[cfg(feature = "migraphx")]
     {
         use ort::execution_providers::MIGraphXExecutionProvider;
-        let available = MIGraphXExecutionProvider::default().is_available();
+        let available = MIGraphXExecutionProvider::default().is_available().unwrap_or(false);
         results.push((ActiveProvider::MiGraphX, available));
     }
 
     #[cfg(feature = "rocm")]
     {
         use ort::execution_providers::ROCmExecutionProvider;
-        let available = ROCmExecutionProvider::default().is_available();
+        let available = ROCmExecutionProvider::default().is_available().unwrap_or(false);
         results.push((ActiveProvider::RoCm, available));
     }
 

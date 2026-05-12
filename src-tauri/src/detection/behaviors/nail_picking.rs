@@ -13,7 +13,10 @@ use crate::detection::analyzer::{
     is_pinching, is_typing_posture, landmark_distance_2d, min_inter_hand_fingertip_distance,
 };
 use crate::detection::behaviors::BehaviorDetector;
-use crate::detection::types::{BfrbType, FrameAnalysis, HandDetection, FINGERTIP_INDICES, WRIST_INDEX};
+use crate::detection::types::{
+    BfrbType, DetectionExplanation, FrameAnalysis, HandDetection, HandSignal, SuppressionReason,
+    FINGERTIP_INDICES, WRIST_INDEX,
+};
 
 pub struct NailPickingDetector {
     proximity_threshold: f32,
@@ -36,7 +39,14 @@ impl NailPickingDetector {
     ///
     /// Detects when thumb tip is very close to another fingertip on the same hand,
     /// indicating a picking motion.
-    fn check_same_hand_picking(&self, hand: &HandDetection) -> Option<f32> {
+    ///
+    /// Returns the best `(confidence, contributing_signal)` for this hand, where
+    /// the signal records thumb→target distance and which fingertip was picked.
+    fn check_same_hand_picking(
+        &self,
+        hand: &HandDetection,
+        hand_index: usize,
+    ) -> Option<(f32, HandSignal)> {
         // Get thumb tip (index 4)
         let thumb_tip = hand.landmarks.get(4)?;
 
@@ -50,7 +60,7 @@ impl NailPickingDetector {
         // Use half the inter-hand threshold
         let same_hand_threshold = self.proximity_threshold * 0.5;
 
-        let mut max_confidence = 0.0_f32;
+        let mut best: Option<(f32, HandSignal)> = None;
 
         // Check distance from thumb tip to other fingertips (index=8, middle=12, ring=16, pinky=20)
         for &tip_idx in &FINGERTIP_INDICES[1..] {
@@ -62,33 +72,42 @@ impl NailPickingDetector {
             let dist = landmark_distance_2d(thumb_tip, other_tip);
             let normalized_dist = dist / scale;
 
-            if normalized_dist < same_hand_threshold {
+            if normalized_dist < same_hand_threshold && self.is_picking_posture(hand, tip_idx) {
                 // Additionally check that the hand is in a picking posture:
                 // - The target finger should be somewhat extended (not fully curled)
                 // - This distinguishes picking from a normal closed fist
-                if self.is_picking_posture(hand, tip_idx) {
-                    let proximity_score = 1.0 - (normalized_dist / same_hand_threshold);
-                    let confidence = proximity_score.min(1.0);
+                let proximity_score = 1.0 - (normalized_dist / same_hand_threshold);
+                let confidence = proximity_score.min(1.0);
 
-                    debug!(
-                        thumb_to_finger = tip_idx,
-                        raw_dist = dist,
-                        normalized_dist = normalized_dist,
-                        threshold = same_hand_threshold,
-                        confidence = confidence,
-                        "NailPicking: same-hand thumb-to-finger"
-                    );
+                debug!(
+                    thumb_to_finger = tip_idx,
+                    raw_dist = dist,
+                    normalized_dist = normalized_dist,
+                    threshold = same_hand_threshold,
+                    confidence = confidence,
+                    "NailPicking: same-hand thumb-to-finger"
+                );
 
-                    max_confidence = max_confidence.max(confidence);
+                if best.as_ref().is_none_or(|(c, _)| confidence > *c) {
+                    best = Some((
+                        confidence,
+                        HandSignal {
+                            hand_index,
+                            side: hand.side,
+                            normalized_distance: normalized_dist,
+                            distance_threshold: same_hand_threshold,
+                            contributing_fingertip: Some(4), // thumb
+                            partner_fingertip: Some(tip_idx),
+                            curl: None,
+                            bonus: 0.0,
+                            confidence,
+                        },
+                    ));
                 }
             }
         }
 
-        if max_confidence > 0.0 {
-            Some(max_confidence)
-        } else {
-            None
-        }
+        best
     }
 
     /// Check if the hand is in a picking posture for same-hand detection.
@@ -135,12 +154,17 @@ impl BehaviorDetector for NailPickingDetector {
         "Nail Picking"
     }
 
-    fn analyze_frame(&self, analysis: &FrameAnalysis) -> Option<f32> {
+    fn analyze_frame_explained(
+        &self,
+        analysis: &FrameAnalysis,
+    ) -> Option<(f32, DetectionExplanation)> {
         // Need at least one hand
         if analysis.hands.is_empty() {
             debug!(hands = 0, "NailPicking: need at least 1 hand");
             return None;
         }
+
+        let mut explanation = DetectionExplanation::empty(BfrbType::NailPicking);
 
         // Check typing suppression (only applies when 2+ hands visible).
         if analysis.hands.len() >= 2
@@ -148,19 +172,21 @@ impl BehaviorDetector for NailPickingDetector {
             && is_typing_posture(&analysis.hands)
         {
             debug!("NailPicking: typing posture suppression");
-            return Some(0.0);
+            explanation.suppressions.push(SuppressionReason::TypingPosture);
+            return Some((0.0, explanation));
         }
 
         let mut max_confidence = 0.0_f32;
 
         // 1. Check SAME-HAND picking (thumb picking at other fingernails)
-        for hand in &analysis.hands {
-            if let Some(conf) = self.check_same_hand_picking(hand) {
+        for (idx, hand) in analysis.hands.iter().enumerate() {
+            if let Some((conf, signal)) = self.check_same_hand_picking(hand, idx) {
                 debug!(
                     confidence = conf,
                     "NailPicking: same-hand picking detected"
                 );
                 max_confidence = max_confidence.max(conf);
+                explanation.hands.push(signal);
             }
         }
 
@@ -182,7 +208,7 @@ impl BehaviorDetector for NailPickingDetector {
                     }
 
                     // Find minimum inter-hand fingertip distance.
-                    let Some((dist, _tip1, _tip2)) =
+                    let Some((dist, tip1, tip2)) =
                         min_inter_hand_fingertip_distance(hand1, hand2)
                     else {
                         continue;
@@ -214,11 +240,36 @@ impl BehaviorDetector for NailPickingDetector {
                     );
 
                     max_confidence = max_confidence.max(confidence);
+                    // Record both contributing hands. partner_fingertip points
+                    // at the other hand's tip so the UI can draw the link.
+                    explanation.hands.push(HandSignal {
+                        hand_index: i,
+                        side: hand1.side,
+                        normalized_distance: normalized_dist,
+                        distance_threshold: self.proximity_threshold,
+                        contributing_fingertip: Some(tip1),
+                        partner_fingertip: Some(tip2),
+                        curl: None,
+                        bonus: pinch_bonus,
+                        confidence,
+                    });
+                    explanation.hands.push(HandSignal {
+                        hand_index: j,
+                        side: hand2.side,
+                        normalized_distance: normalized_dist,
+                        distance_threshold: self.proximity_threshold,
+                        contributing_fingertip: Some(tip2),
+                        partner_fingertip: Some(tip1),
+                        curl: None,
+                        bonus: pinch_bonus,
+                        confidence,
+                    });
                 }
             }
         }
 
-        Some(max_confidence)
+        explanation.frame_confidence = max_confidence;
+        Some((max_confidence, explanation))
     }
 
     fn min_sustained_duration(&self) -> Duration {
@@ -466,6 +517,51 @@ mod tests {
             "same-hand picking confidence was {}",
             confidence.unwrap()
         );
+    }
+
+    #[test]
+    fn explanation_inter_hand_records_partner_fingertip() {
+        let detector = NailPickingDetector::new(&default_config(), true);
+        let hand1 = make_hand_at(0.5, 0.5);
+        let hand2 = make_hand_at(0.501, 0.5);
+
+        let analysis = FrameAnalysis {
+            timestamp: Instant::now(),
+            camera_id: Arc::from("test"),
+            hands: vec![hand1, hand2],
+            face: None,
+            raw_frame: None,
+        };
+
+        let (conf, exp) = detector.analyze_frame_explained(&analysis).unwrap();
+        assert!(conf > 0.5);
+        // Inter-hand emits a paired entry per hand → at least 2.
+        assert!(exp.hands.len() >= 2, "got {} hand signals", exp.hands.len());
+        assert!(exp.hands.iter().all(|h| h.partner_fingertip.is_some()));
+    }
+
+    #[test]
+    fn explanation_same_hand_uses_thumb_as_contributing() {
+        let detector = NailPickingDetector::new(&default_config(), true);
+        let mut hand = make_hand_at(0.5, 0.5);
+        hand.landmarks[4] = Landmark { x: 0.5, y: 0.44, z: 0.0 };
+        hand.landmarks[8] = Landmark { x: 0.5, y: 0.45, z: 0.0 };
+        hand.landmarks[5] = Landmark { x: 0.5, y: 0.55, z: 0.0 };
+
+        let analysis = FrameAnalysis {
+            timestamp: Instant::now(),
+            camera_id: Arc::from("test"),
+            hands: vec![hand],
+            face: None,
+            raw_frame: None,
+        };
+
+        let (_, exp) = detector.analyze_frame_explained(&analysis).unwrap();
+        assert_eq!(exp.hands.len(), 1);
+        let h = &exp.hands[0];
+        // Thumb (4) is the picker, target finger is the partner.
+        assert_eq!(h.contributing_fingertip, Some(4));
+        assert!(matches!(h.partner_fingertip, Some(8 | 12 | 16 | 20)));
     }
 
     #[test]

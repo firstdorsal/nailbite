@@ -27,6 +27,8 @@ pub struct NailbiteConfig {
     pub hotkeys: HotkeysConfig,
     #[serde(default)]
     pub training: TrainingConfig,
+    #[serde(default)]
+    pub history: HistoryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,6 +41,10 @@ pub struct GeneralConfig {
     pub cooldown_seconds: u64,
     #[serde(default = "default_stats_file")]
     pub stats_file: PathBuf,
+    /// When true, the in-app status circle and tray tooltip show the
+    /// number of detections recorded so far today.
+    #[serde(default = "default_true")]
+    pub show_detection_count: bool,
 }
 
 impl Default for GeneralConfig {
@@ -48,6 +54,7 @@ impl Default for GeneralConfig {
             show_preview: false,
             cooldown_seconds: default_cooldown_seconds(),
             stats_file: default_stats_file(),
+            show_detection_count: true,
         }
     }
 }
@@ -58,12 +65,22 @@ pub struct ModelsConfig {
     pub palm_detection: PathBuf,
     #[serde(default = "default_hand_landmark_path")]
     pub hand_landmark: PathBuf,
+    /// Higher-quality hand landmark model (RTMPose-m, SimCC).
+    /// Optional: when present and loadable it replaces the MediaPipe lite
+    /// model above. Used at runtime as the primary hand landmarker, with
+    /// `hand_landmark` (MediaPipe lite) as automatic fallback.
+    #[serde(default = "default_hand_landmark_full_path")]
+    pub hand_landmark_full: PathBuf,
+    /// Quality preference for hand landmarking.
+    /// `auto` = use full model if downloaded and loadable, else lite.
+    /// `lite` = always use MediaPipe lite (fast CPU path).
+    /// `full` = require RTMPose full model; error if not available.
+    #[serde(default)]
+    pub hand_landmark_quality: HandLandmarkQuality,
     #[serde(default = "default_face_detection_path")]
     pub face_detection: PathBuf,
     #[serde(default = "default_face_mesh_path")]
     pub face_mesh: PathBuf,
-    #[serde(default = "default_pose_detection_path")]
-    pub pose_detection: PathBuf,
     #[serde(default = "default_pose_landmark_path")]
     pub pose_landmark: PathBuf,
 }
@@ -73,12 +90,27 @@ impl Default for ModelsConfig {
         Self {
             palm_detection: default_palm_detection_path(),
             hand_landmark: default_hand_landmark_path(),
+            hand_landmark_full: default_hand_landmark_full_path(),
+            hand_landmark_quality: HandLandmarkQuality::default(),
             face_detection: default_face_detection_path(),
             face_mesh: default_face_mesh_path(),
-            pose_detection: default_pose_detection_path(),
             pose_landmark: default_pose_landmark_path(),
         }
     }
+}
+
+/// Hand landmark quality preference.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HandLandmarkQuality {
+    /// Use the high-quality RTMPose model when available, falling back
+    /// to the MediaPipe lite model otherwise.
+    #[default]
+    Auto,
+    /// Always use the MediaPipe lite model. Skips downloading the full model.
+    Lite,
+    /// Require the RTMPose full model. Fails startup if it isn't available.
+    Full,
 }
 
 /// Camera config for V4L2 capture.
@@ -90,6 +122,11 @@ pub struct CameraConfig {
     /// Inference FPS (shared across all cameras).
     #[serde(default = "default_inference_fps")]
     pub inference_fps: u32,
+    /// Preview FPS — how often the camera frame is pushed to the UI. Decoupled
+    /// from `inference_fps` so the live preview can stay smooth even when
+    /// inference runs at a slower rate. Must be >= `inference_fps`.
+    #[serde(default = "default_preview_fps")]
+    pub preview_fps: u32,
 }
 
 impl Default for CameraConfig {
@@ -97,6 +134,7 @@ impl Default for CameraConfig {
         Self {
             sources: default_cameras(),
             inference_fps: default_inference_fps(),
+            preview_fps: default_preview_fps(),
         }
     }
 }
@@ -212,6 +250,15 @@ pub struct OrtConfig {
     pub inter_op_num_threads: u32,
     #[serde(default)]
     pub gpu: GpuConfig,
+    /// ONNX Runtime graph-optimization level.
+    ///
+    /// Defaults to `extended` (Level2). Level3 enables ORT's layout
+    /// transformer, which inserts `ReorderOutput_*` nodes — those trip a
+    /// `GetElementType is not implemented` crash on the opencv_zoo
+    /// MediaPipe palm/face detector models with ORT 1.23 on CPU. Keep on
+    /// `extended` unless you have benchmarked Level3 with your stack.
+    #[serde(default)]
+    pub graph_optimization: GraphOptimization,
 }
 
 impl Default for OrtConfig {
@@ -220,8 +267,25 @@ impl Default for OrtConfig {
             intra_op_num_threads: default_intra_op_threads(),
             inter_op_num_threads: default_inter_op_threads(),
             gpu: GpuConfig::default(),
+            graph_optimization: GraphOptimization::default(),
         }
     }
+}
+
+/// Mirror of `ort::session::builder::GraphOptimizationLevel`, with serde.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphOptimization {
+    /// Disable all optimizations.
+    Disabled,
+    /// Basic constant folding / redundant-node elimination.
+    Basic,
+    /// Extended: above + node fusion, CSE. Safe on CPU + GPU.
+    #[default]
+    Extended,
+    /// All: above + the layout transformer. Faster on GPU; can produce
+    /// `ReorderOutput_*` nodes that crash on ORT 1.23 CPU EP.
+    All,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -232,6 +296,43 @@ pub struct DetectionConfig {
     pub temporal: TemporalConfig,
     #[serde(default)]
     pub false_positive: FalsePositiveConfig,
+    #[serde(default)]
+    pub tracking: TrackingTuning,
+}
+
+/// Hand tracking stability parameters.
+/// These control grace period, confirmation delay, smoothing, and confidence hysteresis.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrackingTuning {
+    /// Number of unmatched frames before a hand goes invisible.
+    /// Higher = more stable but hands persist longer after disappearing.
+    #[serde(default = "default_tracking_grace_frames")]
+    pub grace_frames: u8,
+    /// Number of consecutive detection frames required before a new hand becomes visible.
+    /// Higher = fewer false positives but slower to react to new hands.
+    #[serde(default = "default_tracking_confirmation_frames")]
+    pub confirmation_frames: u8,
+    /// EMA smoothing factor for landmark updates (0 = no smoothing, 1 = no update).
+    #[serde(default = "default_tracking_smoothing_alpha")]
+    pub smoothing_alpha: f32,
+    /// Confidence threshold for accepting a new hand (higher = more selective).
+    #[serde(default = "default_tracking_new_hand_confidence")]
+    pub new_hand_confidence: f32,
+    /// Confidence threshold for keeping an existing tracked hand (lower = more stable).
+    #[serde(default = "default_tracking_existing_hand_confidence")]
+    pub existing_hand_confidence: f32,
+}
+
+impl Default for TrackingTuning {
+    fn default() -> Self {
+        Self {
+            grace_frames: default_tracking_grace_frames(),
+            confirmation_frames: default_tracking_confirmation_frames(),
+            smoothing_alpha: default_tracking_smoothing_alpha(),
+            new_hand_confidence: default_tracking_new_hand_confidence(),
+            existing_hand_confidence: default_tracking_existing_hand_confidence(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -351,6 +452,47 @@ pub struct ActionsConfig {
     pub sound: SoundConfig,
     #[serde(default)]
     pub webhook: WebhookConfig,
+    /// Visual feedback shown when an alert fires (red full-screen vignette).
+    /// Independent from `sound`: user can pick beep, vignette, or both.
+    #[serde(default)]
+    pub visual: VisualConfig,
+    /// Desktop notification with built-in "Correct" / "False positive"
+    /// action buttons. Clicking either button stops the alert sound
+    /// immediately and persists the verdict to the recorded event.
+    #[serde(default)]
+    pub notification: NotificationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NotificationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How long the notification stays on screen before auto-dismissing
+    /// (milliseconds). Most desktops cap this at ~30s anyway.
+    #[serde(default = "default_notification_timeout_ms")]
+    pub timeout_ms: u32,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_ms: default_notification_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VisualConfig {
+    /// Whether to render the alert vignette overlay in the UI.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for VisualConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -481,7 +623,56 @@ impl Default for TrainingConfig {
     }
 }
 
+/// Event history recording configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HistoryConfig {
+    /// Whether event history recording is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Directory for event history storage.
+    #[serde(default = "default_history_dir")]
+    pub dir: PathBuf,
+    /// Number of frames to save before the event trigger.
+    #[serde(default = "default_history_frames_before")]
+    pub frames_before: usize,
+    /// Number of frames to save after the event trigger.
+    #[serde(default = "default_history_frames_after")]
+    pub frames_after: usize,
+    /// Whether to draw landmarks on annotated frames.
+    #[serde(default = "default_true")]
+    pub annotate_landmarks: bool,
+    /// Maximum number of events to keep (oldest are pruned).
+    #[serde(default = "default_history_max_events")]
+    pub max_events: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: default_history_dir(),
+            frames_before: default_history_frames_before(),
+            frames_after: default_history_frames_after(),
+            annotate_landmarks: true,
+            max_events: default_history_max_events(),
+        }
+    }
+}
+
 // --- Default value functions ---
+
+fn default_history_dir() -> PathBuf {
+    PathBuf::from("~/.local/share/nailbite/history")
+}
+fn default_history_frames_before() -> usize {
+    5
+}
+fn default_history_frames_after() -> usize {
+    5
+}
+fn default_history_max_events() -> usize {
+    100
+}
 
 fn default_log_level() -> String {
     "info".to_string()
@@ -498,14 +689,14 @@ fn default_palm_detection_path() -> PathBuf {
 fn default_hand_landmark_path() -> PathBuf {
     PathBuf::from("./models/hand_landmark.onnx")
 }
+fn default_hand_landmark_full_path() -> PathBuf {
+    PathBuf::from("./models/hand_landmark_full.onnx")
+}
 fn default_face_detection_path() -> PathBuf {
     PathBuf::from("./models/face_detection.onnx")
 }
 fn default_face_mesh_path() -> PathBuf {
     PathBuf::from("./models/face_mesh.onnx")
-}
-fn default_pose_detection_path() -> PathBuf {
-    PathBuf::from("./models/pose_detection.onnx")
 }
 fn default_pose_landmark_path() -> PathBuf {
     PathBuf::from("./models/pose_landmark.onnx")
@@ -531,17 +722,27 @@ fn default_camera_height() -> u32 {
 fn default_inference_fps() -> u32 {
     8
 }
+fn default_preview_fps() -> u32 {
+    24
+}
 fn default_intra_op_threads() -> u32 {
-    2
+    // 8 is a good middle ground: enough to saturate inference on modern
+    // 8-32 core desktops without hogging the whole machine. Users with
+    // smaller CPUs can lower this in `config.yaml`.
+    8
 }
 fn default_inter_op_threads() -> u32 {
-    1
+    2
 }
 fn default_proximity_threshold() -> f32 {
     0.35
 }
 fn default_min_sustained_ms() -> u64 {
-    1500
+    // 3000 ms — a brief hand-near-mouth/face touch is almost always
+    // accidental (adjusting glasses, scratching a chin). Real BFRB
+    // episodes routinely sit much longer than this. Bumped from 1500ms
+    // after users reported false positives on incidental motions.
+    3000
 }
 fn default_confidence_threshold() -> f32 {
     0.3
@@ -563,6 +764,9 @@ fn default_sound_file() -> String {
 }
 fn default_volume() -> f32 {
     0.8
+}
+fn default_notification_timeout_ms() -> u32 {
+    20_000
 }
 fn default_webhook_timeout_ms() -> u64 {
     5000
@@ -589,11 +793,27 @@ fn default_frames_dir() -> PathBuf {
     PathBuf::from("~/.local/share/nailbite/frames/")
 }
 
+fn default_tracking_grace_frames() -> u8 {
+    3
+}
+fn default_tracking_confirmation_frames() -> u8 {
+    2
+}
+fn default_tracking_smoothing_alpha() -> f32 {
+    0.3
+}
+fn default_tracking_new_hand_confidence() -> f32 {
+    0.30
+}
+fn default_tracking_existing_hand_confidence() -> f32 {
+    0.15
+}
+
 fn default_nail_biting_config() -> BehaviorConfig {
     BehaviorConfig {
         enabled: true,
         proximity_threshold: 0.35,
-        min_sustained_ms: 1500,
+        min_sustained_ms: 3000,
         confidence_threshold: 0.3,
     }
 }
@@ -602,7 +822,7 @@ fn default_nail_picking_config() -> BehaviorConfig {
     BehaviorConfig {
         enabled: true,
         proximity_threshold: 0.15,
-        min_sustained_ms: 1500,
+        min_sustained_ms: 3000,
         confidence_threshold: 0.3,
     }
 }
@@ -705,6 +925,28 @@ impl NailbiteConfig {
                     format!("duplicate camera id: '{}'", source.id),
                 ));
             }
+        }
+
+        let tracking = &self.detection.tracking;
+        if tracking.smoothing_alpha < 0.0 || tracking.smoothing_alpha > 1.0 {
+            return Err(ConfigError::Validation(
+                "detection.tracking.smoothing_alpha must be in [0.0, 1.0]".to_string(),
+            ));
+        }
+        if tracking.new_hand_confidence < 0.0 || tracking.new_hand_confidence > 1.0 {
+            return Err(ConfigError::Validation(
+                "detection.tracking.new_hand_confidence must be in [0.0, 1.0]".to_string(),
+            ));
+        }
+        if tracking.existing_hand_confidence < 0.0 || tracking.existing_hand_confidence > 1.0 {
+            return Err(ConfigError::Validation(
+                "detection.tracking.existing_hand_confidence must be in [0.0, 1.0]".to_string(),
+            ));
+        }
+        if tracking.existing_hand_confidence > tracking.new_hand_confidence {
+            return Err(ConfigError::Validation(
+                "detection.tracking.existing_hand_confidence must be <= new_hand_confidence (hysteresis)".to_string(),
+            ));
         }
 
         if self.ort.gpu.device_id > 7 {

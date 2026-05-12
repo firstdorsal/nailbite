@@ -11,13 +11,15 @@ use tracing::debug;
 use crate::frame::Frame;
 use crate::detection::types::{HandDetection, HandSide, Landmark};
 use crate::errors::InferenceError;
+use crate::inference::hand_landmark_rtmpose::RtmPoseHandLandmarker;
 use crate::inference::preprocessing::{preprocess_roi, NormalizeRange};
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 224;
-/// Hand presence confidence threshold. Balance between false positives
-/// (detecting non-hands) and stability (not flickering on real hands).
-const CONFIDENCE_THRESHOLD: f32 = 0.25;
+/// Hand presence confidence threshold at the model level.
+/// Set permissively low — the hand tracker applies confidence hysteresis
+/// (new_hand_confidence=0.30, existing_hand_confidence=0.15) for stability.
+const CONFIDENCE_THRESHOLD: f32 = 0.10;
 
 pub struct HandLandmarker {
     session: Arc<ModelSession>,
@@ -137,5 +139,57 @@ impl HandLandmarker {
             landmarks,
             confidence: conf,
         }))
+    }
+}
+
+/// Runtime-selectable hand landmark backend.
+///
+/// `Lite` is the MediaPipe model that ships with the app and always
+/// works; `Full` is the higher-quality RTMPose-m model that may or may
+/// not be available depending on download success / config.
+///
+/// Both variants implement the same `estimate(frame, roi)` contract so
+/// the detection loop doesn't have to branch.
+pub enum HandLandmarkBackend {
+    Lite(HandLandmarker),
+    Full(RtmPoseHandLandmarker),
+}
+
+impl HandLandmarkBackend {
+    /// Build the backend from session handles, preferring the full model
+    /// when present. The lite session is always required as a fallback.
+    pub fn new(
+        lite_session: Arc<ModelSession>,
+        full_session: Option<Arc<ModelSession>>,
+    ) -> Self {
+        match full_session {
+            Some(full) => {
+                tracing::info!("Hand landmarking: using RTMPose full model");
+                Self::Full(RtmPoseHandLandmarker::new(full))
+            }
+            None => {
+                tracing::info!("Hand landmarking: using MediaPipe lite model");
+                Self::Lite(HandLandmarker::new(lite_session))
+            }
+        }
+    }
+
+    pub fn estimate(
+        &self,
+        frame: &Frame,
+        roi: &[f32; 4],
+    ) -> Result<Option<HandDetection>, InferenceError> {
+        match self {
+            Self::Lite(l) => l.estimate(frame, roi),
+            Self::Full(f) => f.estimate(frame, roi),
+        }
+    }
+
+    /// Name of the backend, used for telemetry / debugging.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Lite(_) => "mediapipe_lite",
+            Self::Full(_) => "rtmpose_m_hand5",
+        }
     }
 }

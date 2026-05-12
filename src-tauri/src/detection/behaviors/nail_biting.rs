@@ -14,7 +14,9 @@ use crate::detection::analyzer::{
     mouth_center,
 };
 use crate::detection::behaviors::BehaviorDetector;
-use crate::detection::types::{BfrbType, FrameAnalysis};
+use crate::detection::types::{
+    BfrbType, DetectionExplanation, FrameAnalysis, HandSignal, SuppressionReason,
+};
 
 pub struct NailBitingDetector {
     proximity_threshold: f32,
@@ -49,7 +51,10 @@ impl BehaviorDetector for NailBitingDetector {
         "Nail Biting"
     }
 
-    fn analyze_frame(&self, analysis: &FrameAnalysis) -> Option<f32> {
+    fn analyze_frame_explained(
+        &self,
+        analysis: &FrameAnalysis,
+    ) -> Option<(f32, DetectionExplanation)> {
         // Require at least one hand and a face with mouth landmarks.
         if analysis.hands.is_empty() {
             debug!("NailBiting: no hands detected");
@@ -64,13 +69,17 @@ impl BehaviorDetector for NailBitingDetector {
             return None;
         }
 
+        let mut explanation = DetectionExplanation::empty(BfrbType::NailBiting);
+
         // Check typing suppression.
         if self.typing_suppression && is_typing_posture(&analysis.hands) {
             debug!("NailBiting: typing posture suppression");
-            return Some(0.0);
+            explanation.suppressions.push(SuppressionReason::TypingPosture);
+            return Some((0.0, explanation));
         }
 
         let mut max_confidence = 0.0_f32;
+        let mut chin_rest_fired = false;
 
         for (hand_idx, hand) in analysis.hands.iter().enumerate() {
             // Find closest fingertip to mouth.
@@ -80,6 +89,7 @@ impl BehaviorDetector for NailBitingDetector {
 
             // Normalize distance by face width.
             let normalized_dist = distance / fw;
+            let curl = finger_curl_ratio(hand);
 
             // Suppress chin rest: hand near face but fingers extended AND
             // fingertips not close to mouth. If a fingertip IS near the mouth,
@@ -89,10 +99,20 @@ impl BehaviorDetector for NailBitingDetector {
                 && is_chin_rest(hand, face)
             {
                 debug!(hand = hand_idx, "NailBiting: chin rest suppression");
+                chin_rest_fired = true;
+                explanation.hands.push(HandSignal {
+                    hand_index: hand_idx,
+                    side: hand.side,
+                    normalized_distance: normalized_dist,
+                    distance_threshold: self.proximity_threshold,
+                    contributing_fingertip: Some(tip_idx),
+                    partner_fingertip: None,
+                    curl: Some(curl),
+                    bonus: 0.0,
+                    confidence: 0.0,
+                });
                 continue;
             }
-
-            let curl = finger_curl_ratio(hand);
 
             debug!(
                 hand = hand_idx,
@@ -105,29 +125,42 @@ impl BehaviorDetector for NailBitingDetector {
                 "NailBiting: hand analysis"
             );
 
-            if normalized_dist > self.proximity_threshold {
-                continue;
-            }
-
-            // Compute confidence: closer to mouth = higher confidence.
-            // At proximity_threshold -> 0.0, at 0 distance -> 1.0.
-            let proximity_score = 1.0 - (normalized_dist / self.proximity_threshold);
-
-            // Use proximity score directly. Curl only adds a small bonus
-            // to avoid penalizing valid poses with noisy curl estimates.
-            let confidence = proximity_score * (0.8 + 0.2 * curl);
+            // Always record the signal (even when above threshold) so the live
+            // panel can show "how close are we" before any detection fires.
+            let confidence = if normalized_dist > self.proximity_threshold {
+                0.0
+            } else {
+                let proximity_score = 1.0 - (normalized_dist / self.proximity_threshold);
+                // Use proximity score directly. Curl only adds a small bonus
+                // to avoid penalizing valid poses with noisy curl estimates.
+                proximity_score * (0.8 + 0.2 * curl)
+            };
             max_confidence = max_confidence.max(confidence);
 
             debug!(
                 hand = hand_idx,
-                proximity_score = proximity_score,
-                curl = curl,
                 confidence = confidence,
                 "NailBiting: confidence computed"
             );
+
+            explanation.hands.push(HandSignal {
+                hand_index: hand_idx,
+                side: hand.side,
+                normalized_distance: normalized_dist,
+                distance_threshold: self.proximity_threshold,
+                contributing_fingertip: Some(tip_idx),
+                partner_fingertip: None,
+                curl: Some(curl),
+                bonus: 0.0,
+                confidence,
+            });
         }
 
-        Some(max_confidence)
+        if chin_rest_fired {
+            explanation.suppressions.push(SuppressionReason::ChinRest);
+        }
+        explanation.frame_confidence = max_confidence;
+        Some((max_confidence, explanation))
     }
 
     fn min_sustained_duration(&self) -> Duration {
@@ -309,6 +342,76 @@ mod tests {
 
         let confidence = detector.analyze_frame(&analysis).unwrap();
         assert!(confidence < 0.1, "confidence was {confidence}");
+    }
+
+    #[test]
+    fn explanation_records_contributing_signal() {
+        let detector = NailBitingDetector::new(&default_config(), true, true);
+        let analysis = FrameAnalysis {
+            timestamp: Instant::now(),
+            camera_id: Arc::from("test"),
+            hands: vec![make_curled_hand_near_mouth(0.5, 0.4)],
+            face: Some(make_face_with_mouth(0.5, 0.4)),
+            raw_frame: None,
+        };
+
+        let (conf, exp) = detector.analyze_frame_explained(&analysis).unwrap();
+        assert!(conf > 0.5);
+        assert_eq!(exp.bfrb_type, BfrbType::NailBiting);
+        assert!(exp.suppressions.is_empty(), "no suppression expected");
+        assert_eq!(exp.hands.len(), 1);
+
+        let h = &exp.hands[0];
+        assert!(h.contributing_fingertip.is_some());
+        assert!(h.curl.is_some());
+        assert!(h.normalized_distance < h.distance_threshold);
+        assert!(h.confidence > 0.5);
+        // frame_confidence matches the returned confidence
+        assert!((exp.frame_confidence - conf).abs() < 1e-6);
+    }
+
+    #[test]
+    fn explanation_records_typing_suppression() {
+        // Two hands far apart with extended fingers triggers the typing
+        // posture detector.
+        let detector = NailBitingDetector::new(&default_config(), true, true);
+
+        let typing_hand = |x: f32, y: f32| {
+            let mut lm = [Landmark { x: 0.0, y: 0.0, z: 0.0 }; 21];
+            // Wrist below
+            lm[0] = Landmark { x, y: y + 0.20, z: 0.0 };
+            // Knuckles near wrist
+            for &i in &[1, 5, 9, 13, 17] {
+                lm[i] = Landmark { x, y: y + 0.10, z: 0.0 };
+            }
+            // Fingertips extended away from wrist
+            for &i in &[4, 8, 12, 16, 20] {
+                lm[i] = Landmark { x, y: y - 0.10, z: 0.0 };
+            }
+            // PIP/DIP joints between MCP and tip
+            for &i in &[3, 7, 11, 15, 19] {
+                lm[i] = Landmark { x, y, z: 0.0 };
+            }
+            HandDetection { side: None, landmarks: lm, confidence: 1.0 }
+        };
+
+        let analysis = FrameAnalysis {
+            timestamp: Instant::now(),
+            camera_id: Arc::from("test"),
+            hands: vec![typing_hand(0.3, 0.7), typing_hand(0.7, 0.7)],
+            face: Some(make_face_with_mouth(0.5, 0.3)),
+            raw_frame: None,
+        };
+
+        let (conf, exp) = detector.analyze_frame_explained(&analysis).unwrap();
+        // Suppression returns 0.0 confidence with the suppression flagged.
+        assert_eq!(conf, 0.0);
+        assert!(
+            exp.suppressions
+                .contains(&crate::detection::types::SuppressionReason::TypingPosture),
+            "expected TypingPosture suppression, got {:?}",
+            exp.suppressions
+        );
     }
 
     /// Regression test: chin rest suppression must NOT trigger when a

@@ -37,10 +37,40 @@ export type BfrbType =
   | "skin_picking"
   | "lip_biting";
 
+export type SuppressionReason =
+  | "no_face"
+  | "no_hands"
+  | "typing_posture"
+  | "chin_rest"
+  | "insufficient_hands";
+
+/** Per-hand contribution to a detector's confidence on a single frame. */
+export interface HandSignal {
+  hand_index: number;
+  side: "Left" | "Right" | null;
+  normalized_distance: number;
+  distance_threshold: number;
+  contributing_fingertip: number | null;
+  partner_fingertip: number | null;
+  curl: number | null;
+  bonus: number;
+  confidence: number;
+}
+
+/** Explanation of one detector's decision on a single frame. */
+export interface DetectionExplanation {
+  bfrb_type: BfrbType;
+  hands: HandSignal[];
+  suppressions: SuppressionReason[];
+  frame_confidence: number;
+}
+
 export interface DetectionEvent {
   bfrb_type: BfrbType;
   confidence: number;
   timestamp: string;
+  explanation?: DetectionExplanation | null;
+  event_id?: string | null;
 }
 
 export interface FrameResult {
@@ -81,14 +111,18 @@ export interface GeneralConfig {
   show_preview: boolean;
   cooldown_seconds: number;
   stats_file: string;
+  show_detection_count: boolean;
 }
+
+export type HandLandmarkQuality = "auto" | "lite" | "full";
 
 export interface ModelsConfig {
   palm_detection: string;
   hand_landmark: string;
+  hand_landmark_full: string;
+  hand_landmark_quality: HandLandmarkQuality;
   face_detection: string;
   face_mesh: string;
-  pose_detection: string;
   pose_landmark: string;
 }
 
@@ -105,6 +139,7 @@ export interface CameraSource {
 export interface CameraConfig {
   sources: CameraSource[];
   inference_fps: number;
+  preview_fps: number;
 }
 
 export type GpuPreference = "auto" | "disabled" | "required";
@@ -174,9 +209,14 @@ export interface WebhookConfig {
   timeout_ms: number;
 }
 
+export interface VisualConfig {
+  enabled: boolean;
+}
+
 export interface ActionsConfig {
   sound: SoundConfig;
   webhook: WebhookConfig;
+  visual: VisualConfig;
 }
 
 export interface ExercisesConfig {
@@ -229,6 +269,66 @@ export interface SessionStats {
   total_exercises_completed: number;
   total_dismissed: number;
   total_missed: number;
+}
+
+// Event history types
+export type EventTrigger = "detection" | "missed_event" | "false_positive";
+
+export type Verdict = "true_positive" | "false_positive" | "unsure";
+
+export interface EventHistorySummary {
+  id: string;
+  timestamp: string;
+  trigger: EventTrigger;
+  bfrb_type: string | null;
+  confidence: number | null;
+  frame_count: number;
+  user_rating: number | null;
+  verdict: Verdict | null;
+  trigger_frame: string | null;
+  trigger_frame_annotated: string | null;
+  /** Raw frame filenames for the whole event in chronological order. The
+   *  list view uses this to render a filmstrip on wide viewports. */
+  frame_files: string[];
+}
+
+/** Vector overlay (hand / face / pose landmarks) stored alongside the raw
+ *  JPEG in event.json. Drawn on top of the image at display time so the
+ *  stored pixels stay untouched. Mirrors the live-preview detection types. */
+export interface FrameOverlay {
+  hands: HandDetection[];
+  face: FaceDetection | null;
+  pose: PoseDetection | null;
+}
+
+export interface FrameInfo {
+  offset: number;
+  timestamp_ms: number;
+  hand_count: number;
+  hand_sides: string[];
+  hand_confidences: number[];
+  face_detected: boolean;
+  pose_detected: boolean;
+  raw_filename: string;
+  /** Legacy: filename of a pre-rendered annotated JPEG. May be null on
+   *  events captured after we switched to vector overlays. */
+  annotated_filename: string | null;
+  /** New: vector overlay drawn at display time. */
+  overlay: FrameOverlay | null;
+  explanations: DetectionExplanation[];
+}
+
+export interface EventHistoryDetail {
+  id: string;
+  timestamp: string;
+  trigger: EventTrigger;
+  bfrb_type: string | null;
+  confidence: number | null;
+  user_rating: number | null;
+  verdict: Verdict | null;
+  verdict_reason: string | null;
+  explanation: DetectionExplanation | null;
+  frames: FrameInfo[];
 }
 
 // Tray state

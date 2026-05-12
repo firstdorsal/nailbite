@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useCamera, type CameraState } from "@/hooks/useCamera";
 import { LandmarkCanvas } from "@/components/LandmarkCanvas";
+import { SignalsPanel } from "@/components/SignalsPanel";
 import { StatusIndicator, type Status } from "@/components/StatusIndicator";
 import { cn } from "@/lib/utils";
 import {
@@ -229,6 +230,12 @@ export default function PreviewPage() {
             </div>
           </div>
 
+          {/* Live signals — shows each detector's current "why" */}
+          <SignalsPanel
+            title="Signals"
+            explanations={primaryCamera?.currentSignals ?? []}
+          />
+
           {/* Camera list */}
           {hasMultipleCameras && (
             <div className="rounded-lg border bg-card p-4">
@@ -364,6 +371,7 @@ function CameraFeed({
         imageRef={imageRef}
         showLandmarks={showLandmarks}
         frameBase64={camera.frameBase64}
+        signals={camera.currentSignals}
       />
 
       {/* Camera label for grid view */}

@@ -8,6 +8,12 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
     "global-shortcut:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister"

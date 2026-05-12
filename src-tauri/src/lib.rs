@@ -46,6 +46,21 @@ pub fn run() {
 
     info!("Starting Nailbite Tauri application");
 
+    // Defense-in-depth: disable WebKitGTK DMA-BUF renderer and compositing mode.
+    // The primary fix is pinning WebKitGTK to 2.44.0-2 at build time (before the
+    // DMA-BUF renderer regression in 2.46+). These env vars serve as a safety net
+    // if the AppImage is ever rebuilt with a newer WebKitGTK, preventing the
+    // WebProcess from aborting with "Could not create default EGL display".
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
@@ -202,7 +217,7 @@ pub fn run() {
             // Configure media permissions for WebKitGTK on Linux
             #[cfg(target_os = "linux")]
             {
-                use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+                use webkit2gtk::{HardwareAccelerationPolicy, PermissionRequestExt, SettingsExt, WebViewExt};
 
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.with_webview(|webview| {
@@ -213,7 +228,13 @@ pub fn run() {
                             settings.set_enable_media_stream(true);
                             settings.set_enable_mediasource(true);
                             settings.set_media_playback_requires_user_gesture(false);
-                            info!("WebKit media settings enabled");
+
+                            // Disable hardware acceleration to avoid EGL crashes in
+                            // AppImage environments where GPU drivers may be unavailable
+                            settings.set_hardware_acceleration_policy(
+                                HardwareAccelerationPolicy::Never,
+                            );
+                            info!("WebKit media settings enabled (hardware acceleration disabled)");
                         }
 
                         // Connect permission handler (SECURITY-7: only allow camera)
@@ -257,8 +278,20 @@ pub fn run() {
             commands::exercises::verify_exercise_frame,
             commands::stats::get_stats,
             commands::stats::toggle_pause,
+            commands::stats::toggle_mute,
+            commands::stats::get_runtime_state,
+            commands::stats::get_today_detection_count,
             commands::stats::dismiss_alert,
             commands::stats::mark_missed_event,
+            commands::history::list_event_history,
+            commands::history::get_event_details,
+            commands::history::get_event_frame,
+            commands::history::rate_event,
+            commands::history::set_event_verdict,
+            commands::history::find_recent_event_for_alert,
+            commands::history::delete_event,
+            commands::labels::analyze_labels,
+            commands::labels::export_labeled_dataset,
             #[cfg(target_os = "linux")]
             commands::camera::start_camera,
             #[cfg(target_os = "linux")]

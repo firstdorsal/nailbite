@@ -6,9 +6,12 @@ use std::sync::Arc;
 use tauri::{Emitter, State};
 use tracing::info;
 
+use crate::actions::types::Action;
 use crate::errors::NailbiteError;
 use crate::state::AppState;
+use crate::stats::event_history::EventTrigger;
 use crate::stats::session_log::SessionStats;
+use crate::tray::{apply_tray_state, TrayState};
 
 /// Get session statistics.
 #[tauri::command]
@@ -25,7 +28,25 @@ pub fn toggle_pause(state: State<'_, Arc<AppState>>) -> Result<bool, NailbiteErr
 
     info!(paused = now_paused, "Detection pause toggled");
 
-    // Emit tray state change
+    // Update the tray icon to reflect the new state.
+    let alert_active = state.alert_active.load(Ordering::Relaxed);
+    let tray_state = if now_paused {
+        TrayState::Paused
+    } else if alert_active {
+        TrayState::Detecting
+    } else if state.detection_running.load(Ordering::Relaxed) {
+        TrayState::Ready
+    } else {
+        TrayState::NotReady
+    };
+    let count_opt = if state.config.read().general.show_detection_count {
+        Some(state.today_detection_count.load(Ordering::Relaxed))
+    } else {
+        None
+    };
+    apply_tray_state(&state.app_handle, tray_state, count_opt);
+
+    // Emit tray state change for any UI listening to the global state event.
     let _ = state.app_handle.emit(
         "tray-state",
         serde_json::json!({
@@ -39,6 +60,12 @@ pub fn toggle_pause(state: State<'_, Arc<AppState>>) -> Result<bool, NailbiteErr
 /// Dismiss the current alert.
 #[tauri::command]
 pub fn dismiss_alert(state: State<'_, Arc<AppState>>) -> Result<(), NailbiteError> {
+    // Close the desktop notification regardless of whether the alert is
+    // still flagged active — the user's in-app verdict click might have
+    // raced ahead of the alert-ending pipeline, and leaving the
+    // notification's "Correct / False positive" toast on screen after
+    // the user has already labeled the event in-app is just confusing.
+    crate::commands::camera::close_active_notification(state.inner());
     if state.alert_active.load(Ordering::Relaxed) {
         info!("Alert dismissed by user");
 
@@ -62,9 +89,53 @@ pub fn dismiss_alert(state: State<'_, Arc<AppState>>) -> Result<(), NailbiteErro
 
         // Log as false positive to session log
         state.session_log.log_dismissed(bfrb_type);
+
+        // Trigger event history recording as false positive
+        state.event_history.lock().trigger(
+            EventTrigger::FalsePositive,
+            bfrb_type,
+            None,
+        );
     }
 
     Ok(())
+}
+
+/// Get the current pause and mute state.
+#[tauri::command]
+pub fn get_runtime_state(state: State<'_, Arc<AppState>>) -> serde_json::Value {
+    serde_json::json!({
+        "paused": state.paused.load(Ordering::Relaxed),
+        "muted": state.muted.load(Ordering::Relaxed),
+        "today_detection_count": state.today_detection_count.load(Ordering::Relaxed),
+    })
+}
+
+/// Get just the count of detections so far today (local date).
+#[tauri::command]
+pub fn get_today_detection_count(state: State<'_, Arc<AppState>>) -> u32 {
+    state.today_detection_count.load(Ordering::Relaxed)
+}
+
+/// Toggle the runtime mute flag. When muted, the sound action is silenced
+/// even though the rest of the alert pipeline keeps running (vignette,
+/// webhook, history recording).
+#[tauri::command]
+pub fn toggle_mute(state: State<'_, Arc<AppState>>) -> Result<bool, NailbiteError> {
+    let was_muted = state.muted.load(Ordering::Relaxed);
+    let now_muted = !was_muted;
+    state.muted.store(now_muted, Ordering::Relaxed);
+
+    // If muting while a sound is currently playing, stop it immediately.
+    if now_muted {
+        if let Err(e) = state.sound_action.lock().stop() {
+            tracing::warn!(error = %e, "Failed to stop sound on mute");
+        }
+        *state.sound_stop_time.lock() = None;
+    }
+
+    info!(muted = now_muted, "Sound mute toggled");
+    Ok(now_muted)
 }
 
 /// Mark a missed event (false negative).
@@ -74,6 +145,13 @@ pub fn mark_missed_event(state: State<'_, Arc<AppState>>) -> Result<(), Nailbite
 
     // Log to session log for training data
     state.session_log.log_missed_event();
+
+    // Trigger event history recording for missed event
+    state.event_history.lock().trigger(
+        EventTrigger::MissedEvent,
+        None,
+        None,
+    );
 
     Ok(())
 }

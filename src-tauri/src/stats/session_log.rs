@@ -49,6 +49,13 @@ pub enum LogEntry {
     /// Detection resumed.
     #[serde(rename = "resumed")]
     Resumed { timestamp: String },
+    /// User became present in front of the camera (face visible). Marks
+    /// the start of a usage session for stats / aggregation.
+    #[serde(rename = "session_start")]
+    SessionStart { timestamp: String },
+    /// User left the camera view long enough to count the session over.
+    #[serde(rename = "session_end")]
+    SessionEnd { timestamp: String },
 }
 
 /// Maximum log file size before rotation (10 MB).
@@ -189,6 +196,20 @@ impl SessionLog {
         });
     }
 
+    /// Log a session start (user appeared in front of the camera).
+    pub fn log_session_start(&self) {
+        self.log(&LogEntry::SessionStart {
+            timestamp: Utc::now().to_rfc3339(),
+        });
+    }
+
+    /// Log a session end (user left the camera view).
+    pub fn log_session_end(&self) {
+        self.log(&LogEntry::SessionEnd {
+            timestamp: Utc::now().to_rfc3339(),
+        });
+    }
+
     /// Read stats from the log file.
     ///
     /// Returns aggregated statistics from all log entries.
@@ -222,6 +243,33 @@ impl SessionLog {
         }
 
         stats
+    }
+
+    /// Count `Detection` log entries that fall on the local-timezone day
+    /// of `now`. Used to seed the in-memory "today" counter on startup so
+    /// the value survives restarts within a day.
+    pub fn count_detections_on_day(&self, now: chrono::DateTime<chrono::Local>) -> u32 {
+        let target = now.date_naive();
+        let Ok(content) = fs::read_to_string(&self.file_path) else {
+            return 0;
+        };
+        let mut n: u32 = 0;
+        for line in content.lines() {
+            let Ok(entry) = serde_json::from_str::<LogEntryRead>(line) else {
+                continue;
+            };
+            if entry.entry_type != "detection" {
+                continue;
+            }
+            // Timestamp is RFC3339 in UTC; convert to local then compare day.
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+                let local = parsed.with_timezone(&chrono::Local);
+                if local.date_naive() == target {
+                    n = n.saturating_add(1);
+                }
+            }
+        }
+        n
     }
 
     /// Get the file path (for testing).

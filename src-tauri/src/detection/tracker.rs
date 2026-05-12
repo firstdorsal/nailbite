@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info};
 
-use crate::detection::types::{BfrbType, DetectionEvent};
+use crate::detection::types::{BfrbType, DetectionEvent, DetectionExplanation};
 
 /// Phase of the temporal tracking state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,9 @@ pub struct BehaviorTracker {
     last_camera_id: String,
     /// The highest confidence seen during the current accumulation period.
     peak_confidence: f32,
+    /// Explanation captured at the peak-confidence frame, used to explain
+    /// the alert to the user. None until a positive sample has been seen.
+    peak_explanation: Option<DetectionExplanation>,
     /// Timestamp of last info-level log during Alerting (rate-limited to 1/sec).
     last_alerting_log: Instant,
 }
@@ -79,6 +82,7 @@ impl BehaviorTracker {
             phase_started_at: Instant::now(),
             last_camera_id: String::new(),
             peak_confidence: 0.0,
+            peak_explanation: None,
             last_alerting_log: Instant::now(),
         }
     }
@@ -105,6 +109,20 @@ impl BehaviorTracker {
     pub fn update(
         &mut self,
         confidence: Option<f32>,
+        timestamp: Instant,
+        camera_id: &str,
+    ) -> Option<DetectionEvent> {
+        self.update_with_explanation(confidence, None, timestamp, camera_id)
+    }
+
+    /// Like `update`, but also records the per-frame explanation used to
+    /// produce `confidence`. The tracker keeps the explanation from the
+    /// peak-confidence sample so the resulting `DetectionEvent` can be
+    /// rendered with full context.
+    pub fn update_with_explanation(
+        &mut self,
+        confidence: Option<f32>,
+        explanation: Option<DetectionExplanation>,
         timestamp: Instant,
         camera_id: &str,
     ) -> Option<DetectionEvent> {
@@ -159,6 +177,7 @@ impl BehaviorTracker {
                 } else if conf >= self.confidence_threshold {
                     self.transition_to(TrackingPhase::Accumulating, timestamp);
                     self.peak_confidence = conf;
+                    self.peak_explanation = explanation.clone();
                     None
                 } else {
                     None
@@ -166,8 +185,11 @@ impl BehaviorTracker {
             }
             TrackingPhase::Accumulating => {
                 let conf = confidence.unwrap_or(0.0);
-                if conf >= self.confidence_threshold {
-                    self.peak_confidence = self.peak_confidence.max(conf);
+                if conf >= self.confidence_threshold && conf >= self.peak_confidence {
+                    self.peak_confidence = conf;
+                    if explanation.is_some() {
+                        self.peak_explanation = explanation.clone();
+                    }
                 }
                 if window_mature && current_ratio >= self.positive_ratio {
                     self.transition_to(TrackingPhase::Confirmed, timestamp);
@@ -188,8 +210,11 @@ impl BehaviorTracker {
             }
             TrackingPhase::Alerting => {
                 let conf = confidence.unwrap_or(0.0);
-                if conf >= self.confidence_threshold {
-                    self.peak_confidence = self.peak_confidence.max(conf);
+                if conf >= self.confidence_threshold && conf >= self.peak_confidence {
+                    self.peak_confidence = conf;
+                    if explanation.is_some() {
+                        self.peak_explanation = explanation.clone();
+                    }
                 }
 
                 // Rate-limited info logging: once per second during active alert.
@@ -236,6 +261,7 @@ impl BehaviorTracker {
         self.phase = TrackingPhase::Idle;
         self.window.clear();
         self.peak_confidence = 0.0;
+        self.peak_explanation = None;
     }
 
     /// Remove samples outside the sliding window.
@@ -293,6 +319,7 @@ impl BehaviorTracker {
         self.phase_started_at = timestamp;
         if phase == TrackingPhase::Idle {
             self.peak_confidence = 0.0;
+            self.peak_explanation = None;
         }
     }
 
@@ -304,6 +331,7 @@ impl BehaviorTracker {
             started_at: self.phase_started_at,
             duration,
             camera_id: self.last_camera_id.clone(),
+            explanation: self.peak_explanation.clone(),
         }
     }
 }
@@ -340,6 +368,33 @@ impl DetectionTracker {
                 .and_then(|(_, conf)| *conf);
 
             if let Some(event) = tracker.update(confidence, timestamp, camera_id) {
+                events.push(event);
+            }
+        }
+
+        events
+    }
+
+    /// Like `update`, but also accepts a per-detector explanation that will
+    /// be carried into the resulting `DetectionEvent`.
+    pub fn update_with_explanations(
+        &mut self,
+        results: &[(BfrbType, Option<f32>, Option<DetectionExplanation>)],
+        timestamp: Instant,
+        camera_id: &str,
+    ) -> Vec<DetectionEvent> {
+        let mut events = Vec::new();
+
+        for tracker in &mut self.trackers {
+            let entry = results.iter().find(|(bfrb, _, _)| *bfrb == tracker.bfrb_type());
+            let (confidence, explanation) = match entry {
+                Some((_, c, e)) => (*c, e.clone()),
+                None => (None, None),
+            };
+
+            if let Some(event) =
+                tracker.update_with_explanation(confidence, explanation, timestamp, camera_id)
+            {
                 events.push(event);
             }
         }
@@ -650,6 +705,78 @@ mod tests {
             TrackingPhase::Idle,
             "Alerting should auto-stop to Idle when behavior ceases"
         );
+    }
+
+    #[test]
+    fn peak_explanation_is_carried_into_event() {
+        use crate::detection::types::{HandSignal, SuppressionReason};
+        let mut tracker = make_tracker();
+        let start = Instant::now();
+
+        let mk_exp = |conf: f32| DetectionExplanation {
+            bfrb_type: BfrbType::NailBiting,
+            hands: vec![HandSignal {
+                hand_index: 0,
+                side: None,
+                normalized_distance: 0.10,
+                distance_threshold: 0.35,
+                contributing_fingertip: Some(8),
+                partner_fingertip: None,
+                curl: Some(0.7),
+                bonus: 0.0,
+                confidence: conf,
+            }],
+            suppressions: Vec::<SuppressionReason>::new(),
+            frame_confidence: conf,
+        };
+
+        // Feed positive samples, with the highest confidence in the middle.
+        let mut event = None;
+        for (i, conf) in [0.6_f32, 0.95, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let ts = start + Duration::from_millis(i as u64 * 100);
+            event = tracker.update_with_explanation(
+                Some(conf),
+                Some(mk_exp(conf)),
+                ts,
+                "cam0",
+            );
+            if event.is_some() {
+                break;
+            }
+        }
+
+        let event = event.expect("event should fire");
+        let exp = event.explanation.expect("event must carry explanation");
+        // The peak (0.95) should be the one preserved.
+        assert!(
+            (exp.frame_confidence - 0.95).abs() < 1e-6,
+            "got peak frame_confidence {}",
+            exp.frame_confidence
+        );
+        assert_eq!(exp.hands.len(), 1);
+        assert_eq!(exp.hands[0].contributing_fingertip, Some(8));
+    }
+
+    #[test]
+    fn peak_explanation_clears_on_idle() {
+        let mut tracker = make_tracker();
+        let start = Instant::now();
+
+        let exp = DetectionExplanation::empty(BfrbType::NailBiting);
+        tracker.update_with_explanation(Some(0.8), Some(exp), start, "cam0");
+        assert!(tracker.peak_explanation.is_some());
+
+        // Drop below threshold for long enough → goes to Idle and clears.
+        for i in 1..30 {
+            let ts = start + Duration::from_millis(i * 100);
+            tracker.update_with_explanation(Some(0.0), None, ts, "cam0");
+        }
+        assert_eq!(tracker.phase(), TrackingPhase::Idle);
+        assert!(tracker.peak_explanation.is_none());
     }
 
     #[test]

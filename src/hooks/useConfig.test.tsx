@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
-import { useConfig } from "./useConfig";
+import type { ReactNode } from "react";
+import { ConfigProvider, useConfig } from "./useConfig";
 import { invoke } from "@tauri-apps/api/core";
 import type { NailbiteConfig } from "@/types";
 
@@ -8,23 +9,30 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <ConfigProvider>{children}</ConfigProvider>
+);
+
 const mockConfig: NailbiteConfig = {
   general: {
     log_level: "info",
     show_preview: false,
     cooldown_seconds: 30,
     stats_file: "~/.local/share/nailbite/stats.jsonl",
+    show_detection_count: false,
   },
   models: {
     palm_detection: "./models/palm_detection.onnx",
     hand_landmark: "./models/hand_landmark.onnx",
+    hand_landmark_full: "./models/hand_landmark_full.onnx",
+    hand_landmark_quality: "auto",
     face_detection: "./models/face_detection.onnx",
     face_mesh: "./models/face_mesh.onnx",
-    pose_detection: "./models/pose_detection.onnx",
     pose_landmark: "./models/pose_landmark.onnx",
   },
   camera: {
     inference_fps: 8,
+    preview_fps: 24,
     sources: [
       {
         id: "main",
@@ -90,6 +98,9 @@ const mockConfig: NailbiteConfig = {
       url: "",
       timeout_ms: 5000,
     },
+    visual: {
+      enabled: true,
+    },
   },
   exercises: {
     selection_strategy: "random",
@@ -120,7 +131,7 @@ describe("useConfig", () => {
   it("loads config on mount", async () => {
     vi.mocked(invoke).mockResolvedValueOnce(mockConfig);
 
-    const { result } = renderHook(() => useConfig());
+    const { result } = renderHook(() => useConfig(), { wrapper });
 
     expect(result.current.loading).toBe(true);
     expect(result.current.config).toBe(null);
@@ -137,7 +148,7 @@ describe("useConfig", () => {
   it("handles load error", async () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("Config not found"));
 
-    const { result } = renderHook(() => useConfig());
+    const { result } = renderHook(() => useConfig(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -152,7 +163,7 @@ describe("useConfig", () => {
       .mockResolvedValueOnce(mockConfig) // Initial load
       .mockResolvedValueOnce(undefined); // Save
 
-    const { result } = renderHook(() => useConfig());
+    const { result } = renderHook(() => useConfig(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -174,7 +185,7 @@ describe("useConfig", () => {
       .mockResolvedValueOnce(mockConfig) // Initial load
       .mockRejectedValueOnce(new Error("Permission denied")); // Save
 
-    const { result } = renderHook(() => useConfig());
+    const { result } = renderHook(() => useConfig(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -193,7 +204,7 @@ describe("useConfig", () => {
       .mockResolvedValueOnce(mockConfig) // Initial load
       .mockResolvedValueOnce(updatedConfig); // Reload
 
-    const { result } = renderHook(() => useConfig());
+    const { result } = renderHook(() => useConfig(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

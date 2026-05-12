@@ -58,6 +58,14 @@ pub struct DetectionEventResult {
     pub bfrb_type: String,
     pub confidence: f32,
     pub timestamp: String,
+    /// Contributing signals at the moment of detection. `None` for legacy
+    /// callers / when explanation was not produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<crate::detection::types::DetectionExplanation>,
+    /// Stable directory id of the saved event in event history (matches
+    /// `EventHistorySummary::id`). Lets the frontend label this exact event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 impl From<&Landmark> for LandmarkResult {

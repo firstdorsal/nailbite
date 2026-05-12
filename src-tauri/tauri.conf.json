@@ -14,18 +14,25 @@
     "windows": [
       {
         "title": "Nailbite - BFRB Detection",
+        "label": "main",
         "width": 1024,
         "height": 720,
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
-        "center": true
+        "center": true,
+        "skipTaskbar": false,
+        "visible": true,
+        "focus": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true
       }
     ],
     "trayIcon": {
       "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
+      "iconAsTemplate": false,
       "menuOnLeftClick": false
     },
     "security": {
@@ -46,7 +53,7 @@
     "longDescription": "A desktop application that uses webcam-based machine learning to detect body-focused repetitive behaviors (BFRBs) like nail biting and guides users through evidence-based decoupling exercises.",
     "linux": {
       "appimage": {
-        "bundleMediaFramework": true
+        "bundleMediaFramework": false
       }
     }
   }

@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
-import type { HandDetection, FaceDetection, PoseDetection } from "@/types";
+import { useEffect, useRef } from "react";
+import type {
+  HandDetection,
+  FaceDetection,
+  PoseDetection,
+  DetectionExplanation,
+  HandSignal,
+} from "@/types";
 
 interface LandmarkCanvasProps {
   width: number;
@@ -11,6 +17,12 @@ interface LandmarkCanvasProps {
   showLandmarks?: boolean;
   /** Base64 encoded frame data for direct drawing (avoids async load lag) */
   frameBase64?: string;
+  /**
+   * Per-detector signals for the current frame. Used to overlay
+   * contributing-fingertip → target lines so the user can *see* what is
+   * driving the confidence value.
+   */
+  signals?: DetectionExplanation[];
 }
 
 // Hand landmark connections for skeleton drawing
@@ -77,6 +89,69 @@ const POSE_CONNECTIONS = [
 // Higher visibility threshold to filter out hallucinated/low-confidence landmarks
 const POSE_VISIBILITY_THRESHOLD = 0.65;
 
+// Lip center landmarks used as the "target" for nail-biting signals.
+const UPPER_LIP_CENTER = 13;
+const LOWER_LIP_CENTER = 14;
+
+/**
+ * Resolves the (start, end) pixel coordinates for one signal, given the
+ * detector context. Returns `null` when the data is incomplete.
+ *
+ * - nail_biting: contributing fingertip → mouth center
+ * - nail_picking same-hand (partner on same hand_index): contrib → partner on same hand
+ * - nail_picking inter-hand: contrib → partner on the other hand (matched
+ *   via the paired signal that has identical normalized_distance)
+ */
+function resolveSignalLine(
+  signal: HandSignal,
+  exp: DetectionExplanation,
+  hands: HandDetection[],
+  face: FaceDetection | null,
+  width: number,
+  height: number,
+): { ax: number; ay: number; bx: number; by: number } | null {
+  const fromHand = hands[signal.hand_index];
+  if (!fromHand || signal.contributing_fingertip == null) return null;
+  const fromTip = fromHand.landmarks[signal.contributing_fingertip];
+  if (!fromTip) return null;
+  const ax = fromTip.x * width;
+  const ay = fromTip.y * height;
+
+  if (exp.bfrb_type === "nail_biting") {
+    if (!face) return null;
+    const upper = face.landmarks[UPPER_LIP_CENTER];
+    const lower = face.landmarks[LOWER_LIP_CENTER];
+    if (!upper || !lower) return null;
+    const mx = ((upper.x + lower.x) / 2) * width;
+    const my = ((upper.y + lower.y) / 2) * height;
+    return { ax, ay, bx: mx, by: my };
+  }
+
+  if (signal.partner_fingertip == null) return null;
+
+  // Same-hand picking: a paired signal with same hand_index does not exist —
+  // partner is on the same hand. Inter-hand: find the paired signal that has
+  // matching normalized_distance and a different hand_index.
+  const partnerSignal = exp.hands.find(
+    (other) =>
+      other !== signal &&
+      other.hand_index !== signal.hand_index &&
+      Math.abs(other.normalized_distance - signal.normalized_distance) < 1e-4,
+  );
+
+  const partnerHandIndex = partnerSignal?.hand_index ?? signal.hand_index;
+  const partnerHand = hands[partnerHandIndex];
+  if (!partnerHand) return null;
+  const partnerTip = partnerHand.landmarks[signal.partner_fingertip];
+  if (!partnerTip) return null;
+  return {
+    ax,
+    ay,
+    bx: partnerTip.x * width,
+    by: partnerTip.y * height,
+  };
+}
+
 export function LandmarkCanvas({
   width,
   height,
@@ -86,49 +161,74 @@ export function LandmarkCanvas({
   imageRef,
   showLandmarks = true,
   frameBase64,
+  signals,
 }: LandmarkCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
-
-  // Load image from base64 when it changes
-  useEffect(() => {
-    if (!frameBase64) {
-      setLoadedImage(null);
-      return;
-    }
-
-    const img = new Image();
-    img.onload = () => {
-      setLoadedImage(img);
-    };
-    img.src = `data:image/jpeg;base64,${frameBase64}`;
-
-    return () => {
-      img.onload = null;
-    };
-  }, [frameBase64]);
+  // Cache the previously decoded image so the canvas can keep showing
+  // the last good frame while a new one is decoding (avoids one-frame
+  // flicker on rapid base64 swaps).
+  const prevImageRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear canvas
-    ctx.clearRect(0, 0, width, height);
+    let cancelled = false;
 
-    // Draw image frame - prefer loaded image from base64, fallback to imageRef
-    const image = loadedImage || imageRef.current;
-    if (image && image.complete && image.naturalWidth > 0) {
-      ctx.drawImage(image, 0, 0, width, height);
-    } else {
-      // Draw placeholder background when no image
-      ctx.fillStyle = "#1a1a1a";
-      ctx.fillRect(0, 0, width, height);
+    const drawAll = (image: HTMLImageElement | null) => {
+      if (cancelled) return;
+      ctx.clearRect(0, 0, width, height);
+      if (image && image.complete && image.naturalWidth > 0) {
+        ctx.drawImage(image, 0, 0, width, height);
+      } else {
+        ctx.fillStyle = "#1a1a1a";
+        ctx.fillRect(0, 0, width, height);
+      }
+      if (!showLandmarks) return;
+      drawLandmarks(ctx);
+    };
+
+    // The whole point of this effect is to ensure the image and its
+    // associated landmarks land on the canvas in the SAME paint. If we
+    // updated React state for "image loaded" separately from the
+    // landmark draw, the canvas would briefly show last-frame image +
+    // current-frame landmarks during the decode (~5-15 ms) — visible as
+    // overlay drift even when everything else is smooth.
+    if (!frameBase64) {
+      drawAll(imageRef.current);
+      return () => {
+        cancelled = true;
+      };
     }
 
-    if (!showLandmarks) return;
+    const img = new Image();
+    img.src = `data:image/jpeg;base64,${frameBase64}`;
+    // Prefer img.decode() (resolves after pixel data is ready) but fall
+    // back to onload for older WebKit (the bundled WebKitGTK 2.44 still
+    // supports decode but be defensive).
+    const drawWhenReady = () => {
+      if (cancelled) return;
+      prevImageRef.current = img;
+      drawAll(img);
+    };
+    if (typeof img.decode === "function") {
+      img.decode().then(drawWhenReady).catch(() => {
+        // Decode error: keep showing the previous good frame; landmarks
+        // would drift if we drew them on no image at all.
+        drawAll(prevImageRef.current);
+      });
+    } else {
+      img.onload = drawWhenReady;
+    }
+
+    return () => {
+      cancelled = true;
+      img.onload = null;
+    };
+
+    function drawLandmarks(ctx: CanvasRenderingContext2D) {
 
     // Draw hand landmarks and skeleton
     for (const hand of hands) {
@@ -288,7 +388,81 @@ export function LandmarkCanvas({
       }
     }
 
-  }, [width, height, hands, face, pose, imageRef, showLandmarks, loadedImage]);
+    // Draw detection signal overlays last so they sit on top.
+    // For each contributing hand signal, draw a line from the contributing
+    // fingertip to its target (mouth for biting, partner fingertip for picking).
+    // Color/width reflects whether the signal would fire (confidence > 0).
+    if (signals && signals.length > 0) {
+      // Dedup inter-hand pairs — they emit two mirrored signals; the line
+      // between A→B is the same as B→A.
+      const drawn = new Set<string>();
+      for (const exp of signals) {
+        for (const sig of exp.hands) {
+          if (sig.normalized_distance >= sig.distance_threshold * 1.5) {
+            // Way out of range — skip clutter.
+            continue;
+          }
+          const line = resolveSignalLine(sig, exp, hands, face, width, height);
+          if (!line) continue;
+
+          // Canonical key so we don't draw both halves of an inter-hand pair.
+          const key = [
+            exp.bfrb_type,
+            Math.min(line.ax, line.bx).toFixed(1),
+            Math.min(line.ay, line.by).toFixed(1),
+            Math.max(line.ax, line.bx).toFixed(1),
+            Math.max(line.ay, line.by).toFixed(1),
+          ].join(":");
+          if (drawn.has(key)) continue;
+          drawn.add(key);
+
+          const fired = sig.confidence > 0;
+          const ratio = sig.normalized_distance / sig.distance_threshold;
+          // Brighter when closer; subdued when above threshold.
+          const baseColor = fired ? "#ef4444" : "#9ca3af"; // red-500 / gray-400
+          const lineWidth = fired ? 3 : 1.5;
+
+          // Halo for the contributing fingertip.
+          ctx.fillStyle = fired ? "rgba(239, 68, 68, 0.35)" : "rgba(156, 163, 175, 0.25)";
+          ctx.beginPath();
+          ctx.arc(line.ax, line.ay, fired ? 12 : 7, 0, 2 * Math.PI);
+          ctx.fill();
+
+          // Line from contributing tip to target.
+          ctx.strokeStyle = baseColor;
+          ctx.lineWidth = lineWidth;
+          ctx.setLineDash(fired ? [] : [4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(line.ax, line.ay);
+          ctx.lineTo(line.bx, line.by);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Distance label at midpoint.
+          const midX = (line.ax + line.bx) / 2;
+          const midY = (line.ay + line.by) / 2;
+          const labelText = `${ratio.toFixed(2)}×`;
+          ctx.font = "bold 11px monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          // Background pill for the label
+          const metrics = ctx.measureText(labelText);
+          const padX = 6;
+          const padY = 3;
+          const labelW = metrics.width + padX * 2;
+          const labelH = 16;
+          ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+          ctx.beginPath();
+          ctx.roundRect(midX - labelW / 2, midY - labelH / 2, labelW, labelH, 4);
+          ctx.fill();
+          ctx.fillStyle = baseColor;
+          ctx.fillText(labelText, midX, midY + padY / 2);
+        }
+      }
+    }
+
+    }
+  }, [width, height, hands, face, pose, imageRef, showLandmarks, frameBase64, signals]);
 
   return (
     <canvas

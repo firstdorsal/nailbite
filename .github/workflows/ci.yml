@@ -51,6 +51,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
+        env:
+          # Pin WebKitGTK to 2.44.0-2 to match Docker build and avoid EGL regression
+          WEBKIT_VERSION: "2.44.0-2"
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -58,13 +61,17 @@ jobs:
             cmake \
             clang \
             libclang-dev \
-            libwebkit2gtk-4.1-dev \
+            libwebkit2gtk-4.1-0=${WEBKIT_VERSION} \
+            libwebkit2gtk-4.1-dev=${WEBKIT_VERSION} \
+            libjavascriptcoregtk-4.1-0=${WEBKIT_VERSION} \
+            libjavascriptcoregtk-4.1-dev=${WEBKIT_VERSION} \
+            gir1.2-javascriptcoregtk-4.1=${WEBKIT_VERSION} \
+            gir1.2-webkit2-4.1=${WEBKIT_VERSION} \
             libgtk-3-dev \
             libglib2.0-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
             libasound2-dev \
             libwayland-dev \
             libxkbcommon-dev \
@@ -142,22 +149,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          tags: nailbite:${{ github.sha }}
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Extract artifacts
-        run: |
-          CONTAINER_ID=$(docker create nailbite:${{ github.sha }})
-          mkdir -p dist
-          docker cp "${CONTAINER_ID}:/nailbite" ./dist/nailbite || true
-          docker cp "${CONTAINER_ID}:/bundle" ./dist/ || true
-          docker rm "${CONTAINER_ID}"
+      - name: Build with build.sh
+        env:
+          GPU_BACKEND: none
+          BUILD_MODE: dev
+          BUILDX_CACHE: gha
+          OUTPUT_DIR: ./dist
+        run: bash build.sh
 
       - name: Verify binary
         run: |
