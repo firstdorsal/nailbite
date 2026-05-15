@@ -1,6 +1,6 @@
 //! Session logging in JSONL format.
 //!
-//! Records detections, exercise completions, and user annotations
+//! Records detections, presence sessions, and user annotations
 //! for statistics and progress tracking.
 
 use std::fs::{self, OpenOptions};
@@ -25,14 +25,6 @@ pub enum LogEntry {
         bfrb_type: BfrbType,
         confidence: f32,
         camera_id: String,
-    },
-    /// An exercise was completed.
-    #[serde(rename = "exercise_completed")]
-    ExerciseCompleted {
-        timestamp: String,
-        exercise_id: String,
-        bfrb_type: BfrbType,
-        compliance_ratio: f32,
     },
     /// User dismissed an alert (false positive).
     #[serde(rename = "dismissed")]
@@ -152,21 +144,6 @@ impl SessionLog {
         });
     }
 
-    /// Log an exercise completion.
-    pub fn log_exercise_completed(
-        &self,
-        exercise_id: &str,
-        bfrb_type: BfrbType,
-        compliance_ratio: f32,
-    ) {
-        self.log(&LogEntry::ExerciseCompleted {
-            timestamp: Utc::now().to_rfc3339(),
-            exercise_id: exercise_id.to_string(),
-            bfrb_type,
-            compliance_ratio,
-        });
-    }
-
     /// Log a dismissal (false positive).
     pub fn log_dismissed(&self, bfrb_type: Option<BfrbType>) {
         self.log(&LogEntry::Dismissed {
@@ -229,13 +206,11 @@ impl SessionLog {
                 timestamp: entry.timestamp.clone(),
                 event_type: entry.entry_type.clone(),
                 bfrb_type: entry.bfrb_type.map(|b| b.to_string()),
-                exercise_id: entry.exercise_id.clone(),
                 duration_secs: None,
             });
 
             match entry.entry_type.as_str() {
                 "detection" => stats.total_detections += 1,
-                "exercise_completed" => stats.total_exercises_completed += 1,
                 "dismissed" => stats.total_dismissed += 1,
                 "missed_event" => stats.total_missed += 1,
                 _ => {}
@@ -283,7 +258,6 @@ impl SessionLog {
 pub struct SessionStats {
     pub entries: Vec<SessionStatsEntry>,
     pub total_detections: u32,
-    pub total_exercises_completed: u32,
     pub total_dismissed: u32,
     pub total_missed: u32,
 }
@@ -294,7 +268,6 @@ pub struct SessionStatsEntry {
     pub timestamp: String,
     pub event_type: String,
     pub bfrb_type: Option<String>,
-    pub exercise_id: Option<String>,
     pub duration_secs: Option<u64>,
 }
 
@@ -305,7 +278,6 @@ struct LogEntryRead {
     #[serde(rename = "type")]
     entry_type: String,
     bfrb_type: Option<BfrbType>,
-    exercise_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -343,19 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn exercise_completed_serializes() {
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("stats.jsonl");
-
-        let log = SessionLog::new(&log_path).unwrap();
-        log.log_exercise_completed("fist_clench", BfrbType::NailBiting, 0.92);
-
-        let content = fs::read_to_string(&log_path).unwrap();
-        assert!(content.contains("\"type\":\"exercise_completed\""));
-        assert!(content.contains("fist_clench"));
-    }
-
-    #[test]
     fn read_stats_parses_log_file() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("stats.jsonl");
@@ -363,16 +322,14 @@ mod tests {
         let log = SessionLog::new(&log_path).unwrap();
         log.log_detection(BfrbType::NailBiting, 0.85, "main");
         log.log_detection(BfrbType::NailPicking, 0.75, "main");
-        log.log_exercise_completed("fist_clench", BfrbType::NailBiting, 0.92);
         log.log_dismissed(Some(BfrbType::NailBiting));
         log.log_missed_event();
 
         let stats = log.read_stats();
         assert_eq!(stats.total_detections, 2);
-        assert_eq!(stats.total_exercises_completed, 1);
         assert_eq!(stats.total_dismissed, 1);
         assert_eq!(stats.total_missed, 1);
-        assert_eq!(stats.entries.len(), 5);
+        assert_eq!(stats.entries.len(), 4);
     }
 
     #[test]

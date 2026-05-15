@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { cn } from "@/lib/utils";
 import type {
   HandDetection,
   FaceDetection,
@@ -23,6 +24,8 @@ interface LandmarkCanvasProps {
    * driving the confidence value.
    */
   signals?: DetectionExplanation[];
+  /** Extra classes applied to the canvas element (e.g. CSS sizing). */
+  className?: string;
 }
 
 // Hand landmark connections for skeleton drawing
@@ -162,6 +165,7 @@ export function LandmarkCanvas({
   showLandmarks = true,
   frameBase64,
   signals,
+  className,
 }: LandmarkCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Cache the previously decoded image so the canvas can keep showing
@@ -469,7 +473,7 @@ export function LandmarkCanvas({
       ref={canvasRef}
       width={width}
       height={height}
-      className="rounded-lg"
+      className={cn("block rounded-lg", className)}
     />
   );
 }

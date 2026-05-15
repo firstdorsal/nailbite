@@ -17,14 +17,12 @@ pub mod commands;
 pub mod config;
 pub mod detection;
 pub mod errors;
-pub mod exercises;
 pub mod frame;
 pub mod inference;
 pub mod paths;
 pub mod pipeline;
 pub mod state;
 pub mod stats;
-pub mod training;
 pub mod tray;
 
 use crate::config::NailbiteConfig;
@@ -66,11 +64,24 @@ pub fn run() {
         .setup(|app| {
             info!("Tauri setup starting");
 
-            // Load configuration
-            let config = NailbiteConfig::load("config.yaml").unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "Failed to load config, using defaults");
+            // Load configuration. Use `resolve_data_path` so the lookup honors
+            // `$OWD` when the app is launched via `appimage-run` (see paths.rs).
+            let config_path = crate::paths::resolve_data_path("config.yaml");
+            let mut config = NailbiteConfig::load(&config_path).unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    path = %config_path.display(),
+                    "Failed to load config, using defaults"
+                );
                 NailbiteConfig::default()
             });
+
+            // Rebase relative model paths against `$OWD` for the same reason.
+            // Doing it once here means every downstream consumer (downloader,
+            // session loader, config save) sees an already-resolved path.
+            for model_path in config.models.all_paths_mut() {
+                *model_path = crate::paths::resolve_data_path(&*model_path);
+            }
 
             info!(log_level = %config.general.log_level, "Configuration loaded");
 
@@ -134,6 +145,7 @@ pub fn run() {
                     config.detection.temporal.positive_ratio,
                     config.detection.behaviors.nail_biting.confidence_threshold,
                     std::time::Duration::from_secs(config.general.cooldown_seconds),
+                    std::time::Duration::from_millis(config.detection.behaviors.nail_biting.min_sustained_ms),
                 ));
             }
             if config.detection.behaviors.nail_picking.enabled {
@@ -143,6 +155,7 @@ pub fn run() {
                     config.detection.temporal.positive_ratio,
                     config.detection.behaviors.nail_picking.confidence_threshold,
                     std::time::Duration::from_secs(config.general.cooldown_seconds),
+                    std::time::Duration::from_millis(config.detection.behaviors.nail_picking.min_sustained_ms),
                 ));
             }
             let tracker = DetectionTracker::new(trackers);
@@ -274,8 +287,6 @@ pub fn run() {
             commands::detection::ensure_models,
             commands::config::get_config,
             commands::config::save_config,
-            commands::exercises::get_exercise,
-            commands::exercises::verify_exercise_frame,
             commands::stats::get_stats,
             commands::stats::toggle_pause,
             commands::stats::toggle_mute,

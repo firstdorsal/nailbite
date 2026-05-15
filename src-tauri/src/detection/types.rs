@@ -131,6 +131,12 @@ pub enum SuppressionReason {
     ChinRest,
     /// Inter-hand check needs at least two hands.
     InsufficientHands,
+    /// Both hands fully open / arms outstretched — looks like an arm
+    /// stretch, not picking.
+    StretchingPosture,
+    /// Hand wrapped around an object (cup, bottle) with all fingertips
+    /// clustered — looks like drinking, not biting.
+    GrippingObject,
 }
 
 /// Per-hand contribution to a detector's confidence on a single frame.

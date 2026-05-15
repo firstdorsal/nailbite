@@ -3,7 +3,9 @@
 //! Creates colored circle icons for different app states:
 //! - Green: Ready/normal operation
 //! - Red: Detection active (BFRB detected)
-//! - Yellow: Not ready (camera unavailable, etc.)
+//! - Yellow: Paused
+//! - Gray (light): Not ready (camera unavailable, etc.)
+//! - Gray (dark): User absent from camera — detection idle
 
 use tauri::image::Image;
 use tauri::AppHandle;
@@ -20,6 +22,9 @@ pub enum TrayState {
     NotReady,
     /// Detection paused by the user (gray/amber, distinct from NotReady).
     Paused,
+    /// Camera is on but no user is in frame — detection is gated off
+    /// to avoid false positives on an empty chair (dark gray).
+    Absent,
 }
 
 /// Apply the given state to the system tray (icon + tooltip). The optional
@@ -36,6 +41,7 @@ pub fn apply_tray_state(app: &AppHandle, state: TrayState, today_count: Option<u
             TrayState::Detecting => "Nailbite - BFRB Detected!",
             TrayState::NotReady => "Nailbite - Camera not started",
             TrayState::Paused => "Nailbite - Detection paused",
+            TrayState::Absent => "Nailbite - No one in frame",
         };
         let tooltip = match today_count {
             Some(n) => format!("{base} ({n} today)"),
@@ -60,6 +66,7 @@ pub fn generate_tray_icon(state: TrayState) -> Image<'static> {
         TrayState::Detecting => (0xef, 0x44, 0x44), // red-500 (Alert)
         TrayState::Paused => (0xea, 0xb3, 0x08),    // yellow-500 (Paused)
         TrayState::NotReady => (0x6b, 0x72, 0x80),  // gray-500 (Offline)
+        TrayState::Absent => (0x37, 0x41, 0x51),    // gray-700 (Absent)
     };
 
     let mut pixels = vec![0_u8; (SIZE * SIZE * 4) as usize];
@@ -106,5 +113,6 @@ mod tests {
         let _ = generate_tray_icon(TrayState::Detecting);
         let _ = generate_tray_icon(TrayState::NotReady);
         let _ = generate_tray_icon(TrayState::Paused);
+        let _ = generate_tray_icon(TrayState::Absent);
     }
 }

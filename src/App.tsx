@@ -17,7 +17,9 @@ function AppRoutes() {
     setCurrentBfrb,
     setCurrentConfidence,
     setCurrentExplanation,
+    setTriggerFrame,
     setTodayCount,
+    setPresent,
     bumpExternalResolveSignal,
   } = useDetection();
 
@@ -25,6 +27,7 @@ function AppRoutes() {
   const unlistenDetectedRef = useRef<UnlistenFn | null>(null);
   const unlistenEndedRef = useRef<UnlistenFn | null>(null);
   const unlistenCountRef = useRef<UnlistenFn | null>(null);
+  const unlistenPresenceRef = useRef<UnlistenFn | null>(null);
 
   // Start the detection backend once on app mount and leave it running for
   // the lifetime of the app so behavior is detected from any tab — not just
@@ -49,11 +52,16 @@ function AppRoutes() {
       bfrb_type: string;
       confidence: number;
       explanation?: import("./types").DetectionExplanation | null;
+      trigger_frame_b64?: string | null;
     }>("bfrb-detected", (event) => {
       setAlertActive(true);
       setCurrentBfrb(event.payload.bfrb_type);
       setCurrentConfidence(event.payload.confidence);
       setCurrentExplanation(event.payload.explanation ?? null);
+      // Inline trigger frame: lets the modal show an image the moment
+      // it opens. The event-history annotated frame will replace this
+      // once the event directory has been finalised.
+      setTriggerFrame(event.payload.trigger_frame_b64 ?? null);
       // Sound is handled by Rust backend
     }).then((fn) => {
       unlistenDetectedRef.current = fn;
@@ -85,17 +93,26 @@ function AppRoutes() {
       unlistenCountRef.current = fn;
     });
 
+    listen<{ present: boolean }>("presence-changed", (event) => {
+      setPresent(event.payload.present);
+    }).then((fn) => {
+      unlistenPresenceRef.current = fn;
+    });
+
     return () => {
       unlistenDetectedRef.current?.();
       unlistenEndedRef.current?.();
       unlistenCountRef.current?.();
+      unlistenPresenceRef.current?.();
     };
   }, [
     setAlertActive,
     setCurrentBfrb,
     setCurrentConfidence,
     setCurrentExplanation,
+    setTriggerFrame,
     setTodayCount,
+    setPresent,
     bumpExternalResolveSignal,
   ]);
 

@@ -4,11 +4,9 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import { SignalsPanel } from "@/components/SignalsPanel";
 import { useDetection } from "@/hooks/useDetection";
 import type { Verdict } from "@/types";
@@ -68,7 +66,8 @@ function VerdictButton({
 
 /**
  * Alert modal shown when BFRB behavior is detected.
- * Provides options to start an exercise or dismiss (mark as false positive).
+ * Lets the user record a verdict (correct / false positive / unsure) or
+ * dismiss the alert.
  */
 export default function AlertModal() {
   const {
@@ -76,6 +75,7 @@ export default function AlertModal() {
     currentBfrb,
     currentConfidence,
     currentExplanation,
+    triggerFrame,
     externalResolveSignal,
     setAlertActive,
   } = useDetection();
@@ -97,7 +97,10 @@ export default function AlertModal() {
   // Keep the modal open after the backend says the alert ended so the user
   // has time to label / dismiss. The modal is shown when EITHER the live
   // alert is active OR a recent alert is still within the linger window.
-  const ALERT_LINGER_MS = 12_000;
+  // 30s gives enough headroom for a user who's away from the keyboard or
+  // who only noticed the alert via the system tray and is on their way
+  // back to the window.
+  const ALERT_LINGER_MS = 30_000;
   const [lingerUntil, setLingerUntil] = useState<number | null>(null);
   // Tracks whether we've ever observed a live alert this session. Used to
   // suppress the post-alert linger window at app startup — without it, the
@@ -106,19 +109,22 @@ export default function AlertModal() {
   const hasSeenAlertRef = useRef(false);
   const modalOpen = alertActive || (lingerUntil !== null && Date.now() < lingerUntil);
 
-  // Reset verdict state when a new alert fires.
+  // Reset verdict state when a new alert fires. We seed the modal with
+  // the inline trigger frame from the `bfrb-detected` payload so the
+  // image is visible the moment the modal opens — the annotated frame
+  // from event history replaces it later (see eventId effect below).
   useEffect(() => {
     if (alertActive && currentBfrb && lastBfrbRef.current !== currentBfrb) {
       lastBfrbRef.current = currentBfrb;
       setEventId(null);
       setVerdict(null);
       setSavingVerdict(null);
-      setTriggerImage(null);
+      setTriggerImage(triggerFrame);
     }
     if (!alertActive) {
       lastBfrbRef.current = null;
     }
-  }, [alertActive, currentBfrb]);
+  }, [alertActive, currentBfrb, triggerFrame]);
 
   // Once we have an eventId, fetch the annotated trigger frame so the
   // modal can show what was actually captured. We pull annotated when
@@ -375,16 +381,6 @@ export default function AlertModal() {
           </div>
         </div>
 
-        <DialogFooter>
-          <Button
-            onClick={handleDismiss}
-            className="flex items-center gap-2"
-            autoFocus
-          >
-            <X className="h-4 w-4" />
-            Dismiss
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

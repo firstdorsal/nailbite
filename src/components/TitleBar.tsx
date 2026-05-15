@@ -2,6 +2,43 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useDetection } from "@/hooks/useDetection";
+
+/** Derives a single-token state from the live detection flags.
+ *  Order matters: an alert wins over pause wins over "away" because
+ *  that's the priority of what the user needs to notice first. */
+function getStateBadge(flags: {
+  alertActive: boolean;
+  paused: boolean;
+  present: boolean;
+}): { label: string; dotClass: string; textClass: string } {
+  if (flags.alertActive) {
+    return {
+      label: "Detecting",
+      dotClass: "bg-destructive",
+      textClass: "text-destructive",
+    };
+  }
+  if (flags.paused) {
+    return {
+      label: "Paused",
+      dotClass: "bg-yellow-500",
+      textClass: "text-yellow-500",
+    };
+  }
+  if (!flags.present) {
+    return {
+      label: "Away",
+      dotClass: "bg-muted-foreground",
+      textClass: "text-muted-foreground",
+    };
+  }
+  return {
+    label: "Monitoring",
+    dotClass: "bg-green-500",
+    textClass: "text-green-500",
+  };
+}
 
 /** Plain square outline used for the maximize button (Windows convention). */
 function MaximizeIcon({ className }: { className?: string }) {
@@ -50,6 +87,8 @@ function RestoreIcon({ className }: { className?: string }) {
 export function TitleBar() {
   const win = getCurrentWindow();
   const [isMaximized, setIsMaximized] = useState(false);
+  const { alertActive, paused, present } = useDetection();
+  const state = getStateBadge({ alertActive, paused, present });
 
   useEffect(() => {
     // Track maximized state to swap the icon between Maximize ↔ Restore.
@@ -73,7 +112,12 @@ export function TitleBar() {
   }, [win]);
 
   const handleMinimize = () => {
-    void win.minimize();
+    // With `decorations: false`, several Linux compositors translate a
+    // minimize request on the frameless window into a destroy, which closes
+    // the app instead of iconifying it. The app already has a tray icon with
+    // click-to-restore, so we hide-to-tray here for consistent behavior
+    // across desktops.
+    void win.hide();
   };
   const handleMaximize = () => {
     void win.toggleMaximize();
@@ -95,8 +139,12 @@ export function TitleBar() {
         data-tauri-drag-region
         className="flex h-full items-center gap-2 pl-3 text-xs font-medium tracking-wide"
       >
-        <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary" />
-        Nailbite
+        <span className={cn("inline-block h-2.5 w-2.5 rounded-full", state.dotClass)} />
+        <span>Nailbite</span>
+        <span className="text-muted-foreground">·</span>
+        <span className={cn("text-xs font-normal", state.textClass)}>
+          {state.label}
+        </span>
       </div>
 
       <div className="flex h-full items-stretch">

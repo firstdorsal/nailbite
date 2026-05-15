@@ -8,11 +8,28 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tracing::{debug, error, info, warn};
 use v4l::buffer::Type;
+use v4l::control::{Control, Value as ControlValue};
 use v4l::io::mmap::Stream;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
 use v4l::video::Capture;
 use v4l::FourCC;
+
+// V4L2 control IDs (linux/videodev2.h). Defined inline to avoid pulling
+// in a wider sys binding just for four constants.
+const V4L2_CID_AUTO_WHITE_BALANCE: u32 = 0x0098_090C;
+const V4L2_CID_AUTOGAIN: u32 = 0x0098_0912;
+const V4L2_CID_BACKLIGHT_COMPENSATION: u32 = 0x0098_091C;
+const V4L2_CID_EXPOSURE_AUTO: u32 = 0x009A_0901;
+// V4L2_CID_EXPOSURE_AUTO menu values (v4l2_exposure_auto_type in linux/v4l2-controls.h):
+//   0 = AUTO              (auto exposure time, auto iris)
+//   1 = MANUAL
+//   2 = SHUTTER_PRIORITY  (manual exposure, auto iris)
+//   3 = APERTURE_PRIORITY (auto exposure time, manual iris)
+// Most UVC webcams only support {1, 3}. We try 3 first (works for typical USB cams),
+// then 0 as a fallback for cameras that expose the full enum.
+const EXPOSURE_AUTO_APERTURE_PRIORITY: i64 = 3;
+const EXPOSURE_AUTO_FULL_AUTO: i64 = 0;
 
 use crate::camera::{CameraError, CapturedFrame};
 use crate::frame::Frame;
@@ -151,6 +168,12 @@ fn capture_loop(
         CameraError::DeviceOpen(format!("{}: {}", device_path, e))
     })?;
 
+    // Best-effort: enable the camera's auto-exposure / auto-WB / auto-gain so the
+    // image adapts to room brightness changes instead of staying locked at whatever
+    // values were last set on the device. Not every camera supports every control,
+    // so we log failures and continue rather than aborting capture.
+    enable_auto_image_controls(&dev);
+
     let mut stream = Stream::with_buffers(&dev, Type::VideoCapture, 4).map_err(|e| {
         CameraError::Configuration(format!("Failed to create stream: {}", e))
     })?;
@@ -202,6 +225,58 @@ fn capture_loop(
 
     info!("Camera capture loop stopped");
     Ok(())
+}
+
+/// Turn on the camera's adaptive image controls so the captured frame tracks
+/// changes in room brightness, scene color temperature, and gain.
+///
+/// Auto-exposure is a menu control. UVC webcams typically only accept
+/// APERTURE_PRIORITY (3); cameras with a full v4l2_exposure_auto_type enum
+/// also accept AUTO (0). We try APERTURE_PRIORITY first and fall back.
+fn enable_auto_image_controls(dev: &Device) {
+    if let Err(e) = dev.set_control(Control {
+        id: V4L2_CID_EXPOSURE_AUTO,
+        value: ControlValue::Integer(EXPOSURE_AUTO_APERTURE_PRIORITY),
+    }) {
+        debug!(
+            error = %e,
+            "exposure_auto=aperture_priority rejected; trying full-auto fallback"
+        );
+        if let Err(e2) = dev.set_control(Control {
+            id: V4L2_CID_EXPOSURE_AUTO,
+            value: ControlValue::Integer(EXPOSURE_AUTO_FULL_AUTO),
+        }) {
+            warn!(
+                error = %e2,
+                "Could not enable auto-exposure — image won't adapt to brightness changes"
+            );
+        } else {
+            info!("Camera auto-exposure enabled (full auto)");
+        }
+    } else {
+        info!("Camera auto-exposure enabled (aperture priority)");
+    }
+
+    if let Err(e) = dev.set_control(Control {
+        id: V4L2_CID_AUTO_WHITE_BALANCE,
+        value: ControlValue::Boolean(true),
+    }) {
+        debug!(error = %e, "Could not enable auto white balance");
+    }
+
+    if let Err(e) = dev.set_control(Control {
+        id: V4L2_CID_AUTOGAIN,
+        value: ControlValue::Boolean(true),
+    }) {
+        debug!(error = %e, "Could not enable auto gain");
+    }
+
+    if let Err(e) = dev.set_control(Control {
+        id: V4L2_CID_BACKLIGHT_COMPENSATION,
+        value: ControlValue::Integer(1),
+    }) {
+        debug!(error = %e, "Could not enable backlight compensation");
+    }
 }
 
 /// Convert YUYV (YUV 4:2:2) to RGB.

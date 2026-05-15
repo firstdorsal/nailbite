@@ -1,140 +1,28 @@
 import { useState, useRef, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useCamera, type CameraState } from "@/hooks/useCamera";
 import { LandmarkCanvas } from "@/components/LandmarkCanvas";
-import { SignalsPanel } from "@/components/SignalsPanel";
-import { StatusIndicator, type Status } from "@/components/StatusIndicator";
 import { cn } from "@/lib/utils";
 import {
-  Camera,
   CameraOff,
   Eye,
   EyeOff,
-  XCircle,
   AlertTriangle,
-  Pause,
   Grid2x2,
   Maximize2,
 } from "lucide-react";
 
 export default function PreviewPage() {
   const [showLandmarks, setShowLandmarks] = useState(true);
-  const [cameraEnabled, setCameraEnabled] = useState(true);
   const [viewMode, setViewMode] = useState<"primary" | "grid">("primary");
 
-  const { cameras, primaryCamera, alertActive, paused, error, isStreaming, getImageRef } =
-    useCamera({
-      enabled: cameraEnabled,
-    });
-
-  const handleDismiss = async () => {
-    try {
-      await invoke("dismiss_alert");
-    } catch (e) {
-      console.error("Failed to dismiss:", e);
-    }
-  };
-
-  const handleMarkMissed = async () => {
-    try {
-      await invoke("mark_missed_event");
-    } catch (e) {
-      console.error("Failed to mark missed:", e);
-    }
-  };
-
-  const getStatus = (): Status => {
-    if (!cameraEnabled || !isStreaming) return "offline";
-    if (paused) return "offline";
-    if (alertActive) return "alert";
-    return "normal";
-  };
+  const { cameras, primaryCamera, error, isStreaming, getImageRef } =
+    useCamera({ enabled: true });
 
   const cameraList = Array.from(cameras.values());
   const hasMultipleCameras = cameraList.length > 1;
 
   return (
     <div className="flex h-full flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-bold">Camera Preview</h1>
-          <StatusIndicator status={getStatus()} />
-          {paused && (
-            <span className="flex items-center gap-1 text-sm text-muted-foreground">
-              <Pause className="h-4 w-4" />
-              Paused
-            </span>
-          )}
-          {hasMultipleCameras && (
-            <span className="text-sm text-muted-foreground">
-              {cameraList.length} cameras
-            </span>
-          )}
-        </div>
-
-        <div className="flex gap-2">
-          {hasMultipleCameras && (
-            <button
-              onClick={() =>
-                setViewMode(viewMode === "primary" ? "grid" : "primary")
-              }
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors",
-                "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-              )}
-              title={
-                viewMode === "primary"
-                  ? "Show grid view"
-                  : "Show primary camera only"
-              }
-            >
-              {viewMode === "primary" ? (
-                <Grid2x2 className="h-4 w-4" />
-              ) : (
-                <Maximize2 className="h-4 w-4" />
-              )}
-              {viewMode === "primary" ? "Grid" : "Primary"}
-            </button>
-          )}
-
-          <button
-            onClick={() => setShowLandmarks(!showLandmarks)}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors",
-              showLandmarks
-                ? "bg-primary text-primary-foreground"
-                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-            )}
-            title={showLandmarks ? "Hide landmarks" : "Show landmarks"}
-          >
-            {showLandmarks ? (
-              <Eye className="h-4 w-4" />
-            ) : (
-              <EyeOff className="h-4 w-4" />
-            )}
-            Landmarks
-          </button>
-
-          <button
-            onClick={() => setCameraEnabled(!cameraEnabled)}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors",
-              cameraEnabled
-                ? "bg-primary text-primary-foreground"
-                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
-            )}
-          >
-            {cameraEnabled ? (
-              <Camera className="h-4 w-4" />
-            ) : (
-              <CameraOff className="h-4 w-4" />
-            )}
-            {cameraEnabled ? "Stop" : "Start"}
-          </button>
-        </div>
-      </div>
-
       {/* Error display */}
       {error && (
         <div className="flex items-center gap-2 rounded-lg bg-destructive/10 p-4 text-destructive">
@@ -143,10 +31,16 @@ export default function PreviewPage() {
         </div>
       )}
 
-      {/* Main content */}
-      <div className="flex flex-1 gap-4">
-        {/* Video feed */}
-        <div className="relative flex-1">
+      {/* Camera + signals row. Both columns share a fixed height
+          (PREVIEW_ROW_HEIGHT) so the camera is visually the same
+          size as the panel beside it. We deliberately do NOT use
+          `flex-1 items-stretch` here — the row would inherit the
+          whole page height, the canvas's aspect-ratio CSS would
+          then compute a very wide width, and the camera column
+          would overflow and slide under the (transparent) signals
+          column. A bounded height keeps both bounded. */}
+      <div className="flex h-[540px] items-start gap-4">
+        <div className="flex h-full items-start gap-2">
           {isStreaming ? (
             viewMode === "primary" || !hasMultipleCameras ? (
               <CameraFeed
@@ -168,7 +62,7 @@ export default function PreviewPage() {
               </div>
             )
           ) : (
-            <div className="flex h-[480px] w-[640px] items-center justify-center rounded-lg bg-muted">
+            <div className="flex h-full aspect-[4/3] items-center justify-center rounded-lg bg-muted">
               <div className="flex flex-col items-center gap-2 text-muted-foreground">
                 <CameraOff className="h-12 w-12" />
                 <span>Camera off</span>
@@ -176,135 +70,74 @@ export default function PreviewPage() {
             </div>
           )}
 
-          {/* Alert overlay */}
-          {alertActive && (
-            <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
-              <div className="rounded-lg bg-background/90 p-4 text-center">
-                <p className="text-lg font-bold text-destructive">
-                  BFRB Detected
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  Complete the exercise to dismiss
-                </p>
-              </div>
-            </div>
-          )}
+          {/* Compact icon-button column directly attached to the camera. */}
+          <div className="flex flex-col gap-2">
+            <CameraIconButton
+              onClick={() => setShowLandmarks(!showLandmarks)}
+              active={showLandmarks}
+              title={showLandmarks ? "Hide landmarks" : "Show landmarks"}
+            >
+              {showLandmarks ? (
+                <Eye className="h-4 w-4" />
+              ) : (
+                <EyeOff className="h-4 w-4" />
+              )}
+            </CameraIconButton>
+            {hasMultipleCameras && (
+              <CameraIconButton
+                onClick={() =>
+                  setViewMode(viewMode === "primary" ? "grid" : "primary")
+                }
+                active={viewMode === "grid"}
+                title={
+                  viewMode === "primary"
+                    ? "Show grid view"
+                    : "Show primary camera only"
+                }
+              >
+                {viewMode === "primary" ? (
+                  <Grid2x2 className="h-4 w-4" />
+                ) : (
+                  <Maximize2 className="h-4 w-4" />
+                )}
+              </CameraIconButton>
+            )}
+          </div>
         </div>
 
-        {/* Side panel */}
-        <div className="flex w-64 flex-col gap-4">
-          {/* Detection info */}
-          <div className="rounded-lg border bg-card p-4">
-            <h3 className="mb-2 font-semibold">Detection</h3>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Hands:</span>
-                <span>
-                  {primaryCamera?.hands.length ?? 0}
-                  {(primaryCamera?.hands.length ?? 0) > 0 && (
-                    <span className="ml-1 text-xs text-muted-foreground">
-                      (L:{primaryCamera?.hands.filter(h => h.handedness === "left").length ?? 0}
-                      {" "}R:{primaryCamera?.hands.filter(h => h.handedness === "right").length ?? 0})
-                    </span>
-                  )}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Face:</span>
-                <span>{primaryCamera?.face ? "Yes" : "No"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Pose:</span>
-                <span>{primaryCamera?.pose ? "Yes" : "No"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Alert:</span>
-                <span className={alertActive ? "text-destructive" : ""}>
-                  {alertActive ? "Active" : "None"}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Cameras:</span>
-                <span>{cameraList.length}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Live signals — shows each detector's current "why" */}
-          <SignalsPanel
-            title="Signals"
-            explanations={primaryCamera?.currentSignals ?? []}
-          />
-
-          {/* Camera list */}
-          {hasMultipleCameras && (
-            <div className="rounded-lg border bg-card p-4">
-              <h3 className="mb-2 font-semibold">Cameras</h3>
-              <div className="space-y-2 text-sm">
-                {cameraList.map((camera) => (
-                  <div
-                    key={camera.cameraId}
-                    className="flex items-center justify-between"
-                  >
-                    <span className="text-muted-foreground">
-                      {camera.cameraId}
-                    </span>
-                    <span
-                      className={cn(
-                        "rounded px-1.5 py-0.5 text-xs",
-                        camera.role === "primary"
-                          ? "bg-primary/20 text-primary"
-                          : "bg-muted text-muted-foreground"
-                      )}
-                    >
-                      {camera.role}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Quick actions */}
-          <div className="rounded-lg border bg-card p-4">
-            <h3 className="mb-2 font-semibold">Quick Actions</h3>
-            <div className="flex flex-col gap-2">
-              <button
-                onClick={handleDismiss}
-                className="flex items-center justify-center gap-2 rounded-lg bg-secondary px-3 py-2 text-sm transition-colors hover:bg-secondary/80"
-                disabled={!alertActive}
-              >
-                <XCircle className="h-4 w-4" />
-                Dismiss Alert (F9)
-              </button>
-              <button
-                onClick={handleMarkMissed}
-                className="flex items-center justify-center gap-2 rounded-lg bg-secondary px-3 py-2 text-sm transition-colors hover:bg-secondary/80"
-              >
-                <AlertTriangle className="h-4 w-4" />
-                Mark Missed (F10)
-              </button>
-            </div>
-          </div>
-
-          {/* Hotkey reference */}
-          <div className="rounded-lg border bg-card p-4">
-            <h3 className="mb-2 font-semibold">Hotkeys</h3>
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <div>
-                <kbd className="rounded bg-muted px-1">F9</kbd> Dismiss
-              </div>
-              <div>
-                <kbd className="rounded bg-muted px-1">F10</kbd> Mark missed
-              </div>
-              <div>
-                <kbd className="rounded bg-muted px-1">F11</kbd> Pause/Resume
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
+  );
+}
+
+interface CameraIconButtonProps {
+  onClick: () => void;
+  active: boolean;
+  title: string;
+  children: React.ReactNode;
+}
+
+function CameraIconButton({
+  onClick,
+  active,
+  title,
+  children,
+}: CameraIconButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      className={cn(
+        "flex h-8 w-8 items-center justify-center rounded-lg transition-colors",
+        active
+          ? "bg-primary text-primary-foreground"
+          : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -335,7 +168,7 @@ function CameraFeed({
       <div
         className={cn(
           "flex items-center justify-center rounded-lg bg-muted",
-          compact ? "h-[240px] w-[320px]" : "h-[480px] w-[640px]"
+          compact ? "h-[240px] aspect-[4/3]" : "h-full aspect-[4/3]",
         )}
       >
         <div className="flex flex-col items-center gap-2 text-muted-foreground">
@@ -346,13 +179,20 @@ function CameraFeed({
     );
   }
 
-  // Use actual camera dimensions, scaled down if compact mode
-  const scale = compact ? 0.5 : 1;
-  const width = Math.round((camera.width || 640) * scale);
-  const height = Math.round((camera.height || 480) * scale);
+  // Canvas keeps its native capture resolution so landmark drawing
+  // stays sharp; CSS scales it to fit the available container height
+  // (preserving the 4:3 aspect ratio) so the preview is sized to
+  // match the side panel rather than being locked to a fixed 480 px.
+  const width = camera.width || 640;
+  const height = camera.height || 480;
 
   return (
-    <div className="relative">
+    <div
+      className={cn(
+        "relative",
+        compact ? "h-[240px]" : "h-full aspect-[4/3]",
+      )}
+    >
       {/* Hidden image element that receives frame data */}
       <img
         ref={imageRef}
@@ -372,6 +212,7 @@ function CameraFeed({
         showLandmarks={showLandmarks}
         frameBase64={camera.frameBase64}
         signals={camera.currentSignals}
+        className="h-full w-full"
       />
 
       {/* Camera label for grid view */}

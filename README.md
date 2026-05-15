@@ -1,16 +1,17 @@
 # Nailbite
 
-**BFRB (Body-Focused Repetitive Behavior) detection and decoupling exercise system.**
+**BFRB (Body-Focused Repetitive Behavior) detection system.**
 
-Nailbite uses your webcam to detect nail biting, nail picking, and other BFRBs in real-time. When a behavior is detected, it guides you through evidence-based decoupling exercises from psychotherapy. Everything runs locally on your machine - no data is sent to any server.
+Nailbite uses your webcam to detect nail biting, nail picking, and similar BFRBs in real time, alerts you when one happens, and lets you label each event as a true or false positive to tune the detector over time. Everything runs locally on your machine — no data is sent to any server.
 
 ## Features
 
 - **Real-time BFRB Detection**: Detects nail biting and nail picking using AI-based hand and face tracking
-- **Decoupling Exercises**: Guided exercises based on Habit Reversal Training (Azrin & Nunn) and the Moritz Decoupling Protocol
-- **System Tray Integration**: Runs in background, tray icon shows status
+- **Presence-gated**: Multi-modal presence check (face mesh + pose torso landmarks) ensures detection is silenced when the user is not in frame
+- **System Tray Integration**: Runs in background; tray icon shows monitoring / detecting / paused / absent state
+- **Desktop Notifications**: Inline "Correct / False positive" buttons for in-the-moment labeling
+- **Event History + Insights**: Every detection captures a multi-frame clip with the contributing signals; the Insights page sweeps thresholds against your labels to suggest tuning
 - **Audio Alerts**: Configurable sound alerts when BFRB is detected
-- **Statistics Tracking**: Track detections and exercise completion over time
 - **GPU Acceleration**: Optional CUDA/TensorRT (NVIDIA) or ROCm/MIGraphX (AMD) support
 - **Privacy-First**: All processing runs locally, no cloud services
 
@@ -113,10 +114,10 @@ ort:
 ## How It Works
 
 1. **Camera Capture**: Captures frames from your webcam using V4L2
-2. **AI Detection**: Runs ONNX models for hand, face, and pose detection
-3. **Behavior Analysis**: Detects BFRB patterns (e.g., fingertips near mouth)
-4. **Alert & Exercise**: Plays alert sound and shows exercise instructions
-5. **Verification**: Uses camera to verify you're doing the exercise correctly
+2. **AI Detection**: Runs ONNX models for hand, face, and pose landmarks
+3. **Presence Gate**: Face mesh + pose torso landmarks have to agree on "user in frame" before detection runs — gates off the empty chair
+4. **Behavior Analysis**: Detects BFRB patterns (e.g., fingertips near mouth) with temporal smoothing and per-hand explanations
+5. **Alert + Label**: Plays the alert sound, surfaces a verdict notification, and records the captured clip + signals to the event history for later review and threshold tuning
 
 ONNX models are automatically downloaded on first run (~50MB total).
 
@@ -150,5 +151,4 @@ MIT
 ## Acknowledgments
 
 - Detection models from [OpenCV Zoo](https://github.com/opencv/opencv_zoo) and [IntelliProve](https://github.com/IntelliProve/face-detection-onnx)
-- Decoupling exercises based on research from UKE Hamburg ([tricks-gegen-ticks.de](https://tricks-gegen-ticks.de))
 - Built with [Tauri](https://tauri.app/), [React](https://react.dev/), and [ONNX Runtime](https://onnxruntime.ai/)

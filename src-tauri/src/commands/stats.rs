@@ -26,6 +26,16 @@ pub fn toggle_pause(state: State<'_, Arc<AppState>>) -> Result<bool, NailbiteErr
     let now_paused = !was_paused;
     state.paused.store(now_paused, Ordering::Relaxed);
 
+    // When pausing while an alert is firing, kill the in-flight sound too —
+    // the user's intent is "stop nagging me," and leaving a `repeat: true`
+    // beep running after pause feels like a bug.
+    if now_paused {
+        if let Err(e) = state.sound_action.lock().stop() {
+            tracing::warn!(error = %e, "Failed to stop sound on pause");
+        }
+        *state.sound_stop_time.lock() = None;
+    }
+
     info!(paused = now_paused, "Detection pause toggled");
 
     // Update the tray icon to reflect the new state.
@@ -68,6 +78,18 @@ pub fn dismiss_alert(state: State<'_, Arc<AppState>>) -> Result<(), NailbiteErro
     crate::commands::camera::close_active_notification(state.inner());
     if state.alert_active.load(Ordering::Relaxed) {
         info!("Alert dismissed by user");
+
+        // Stop the alert sound. When the user invokes dismiss explicitly
+        // (F9, the in-app verdict button, or a notification action), the
+        // looping `repeat: true` sound action would otherwise keep beeping
+        // until its sample finished — which never happens with
+        // `repeat_infinite`. The detection-loop teardown paths in `camera.rs`
+        // call `sound_action.stop()` too; this is the equivalent call for
+        // user-initiated dismissals.
+        if let Err(e) = state.sound_action.lock().stop() {
+            tracing::warn!(error = %e, "Failed to stop sound on dismiss");
+        }
+        *state.sound_stop_time.lock() = None;
 
         // Get the current BFRB type before clearing
         let bfrb_type = state.current_bfrb.lock().take();

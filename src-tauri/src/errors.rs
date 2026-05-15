@@ -13,9 +13,6 @@ pub enum NailbiteError {
     #[error("Action error: {0}")]
     Action(#[from] ActionError),
 
-    #[error("Training error: {0}")]
-    Training(#[from] TrainingError),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -111,13 +108,4 @@ pub enum ActionError {
 
     #[error("Webhook error: {0}")]
     Webhook(String),
-}
-
-#[derive(Debug, Error)]
-pub enum TrainingError {
-    #[error("Failed to write annotation: {0}")]
-    WriteFailed(String),
-
-    #[error("Failed to save frame: {0}")]
-    FrameSaveFailed(String),
 }

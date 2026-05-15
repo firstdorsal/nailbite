@@ -4,9 +4,23 @@ import type { DetectionExplanation } from "@/types";
 interface DetectionState {
   alertActive: boolean;
   paused: boolean;
+  /**
+   * Whether a user is currently in frame, as decided by the backend's
+   * multi-modal presence tracker (face mesh + pose torso landmarks).
+   * Drives the dark-gray "no one in frame" indicator.
+   */
+  present: boolean;
   currentBfrb: string | null;
   currentConfidence: number | null;
   currentExplanation: DetectionExplanation | null;
+  /**
+   * Base64-encoded JPEG of the trigger frame, emitted inline with the
+   * `bfrb-detected` event so the modal can render an image immediately
+   * on open rather than waiting for the event-history directory to
+   * finalise. Replaced by the annotated frame later once `eventId`
+   * resolves and event details are fetched.
+   */
+  triggerFrame: string | null;
   /** Detections confirmed so far today (local time). */
   todayCount: number;
   /**
@@ -18,9 +32,11 @@ interface DetectionState {
   externalResolveSignal: number;
   setAlertActive: (active: boolean) => void;
   setPaused: (paused: boolean) => void;
+  setPresent: (present: boolean) => void;
   setCurrentBfrb: (bfrb: string | null) => void;
   setCurrentConfidence: (confidence: number | null) => void;
   setCurrentExplanation: (explanation: DetectionExplanation | null) => void;
+  setTriggerFrame: (frame: string | null) => void;
   setTodayCount: (count: number) => void;
   bumpExternalResolveSignal: () => void;
 }
@@ -45,12 +61,18 @@ const DetectionContext = createContext<DetectionState | undefined>(undefined);
 export function DetectionProvider({ children }: { children: ReactNode }) {
   const [alertActive, setAlertActive] = useState(false);
   const [paused, setPaused] = useState(false);
+  // Assume present at boot — the backend will quickly flip this to
+  // `false` after the absent debounce if no one is actually in frame.
+  // Starting `true` avoids a flash of the dark-gray indicator on every
+  // launch.
+  const [present, setPresent] = useState(true);
   const [currentBfrb, setCurrentBfrb] = useState<string | null>(null);
   const [currentConfidence, setCurrentConfidence] = useState<number | null>(
     null
   );
   const [currentExplanation, setCurrentExplanation] =
     useState<DetectionExplanation | null>(null);
+  const [triggerFrame, setTriggerFrame] = useState<string | null>(null);
   const [todayCount, setTodayCount] = useState(0);
   const [externalResolveSignal, setExternalResolveSignal] = useState(0);
   const bumpExternalResolveSignal = () =>
@@ -61,16 +83,20 @@ export function DetectionProvider({ children }: { children: ReactNode }) {
       value={{
         alertActive,
         paused,
+        present,
         currentBfrb,
         currentConfidence,
         currentExplanation,
+        triggerFrame,
         todayCount,
         externalResolveSignal,
         setAlertActive,
         setPaused,
+        setPresent,
         setCurrentBfrb,
         setCurrentConfidence,
         setCurrentExplanation,
+        setTriggerFrame,
         setTodayCount,
         bumpExternalResolveSignal,
       }}

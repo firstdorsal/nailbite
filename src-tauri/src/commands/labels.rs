@@ -597,6 +597,7 @@ pub fn export_labeled_dataset(
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
 

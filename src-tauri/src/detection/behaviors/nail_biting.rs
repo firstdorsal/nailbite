@@ -10,8 +10,8 @@ use tracing::debug;
 
 use crate::config::BehaviorConfig;
 use crate::detection::analyzer::{
-    face_width, finger_curl_ratio, is_chin_rest, is_typing_posture, min_fingertip_distance,
-    mouth_center,
+    face_width, finger_curl_ratio, is_chin_rest, is_gripping_object, is_typing_posture,
+    min_fingertip_distance, mouth_center,
 };
 use crate::detection::behaviors::BehaviorDetector;
 use crate::detection::types::{
@@ -90,6 +90,31 @@ impl BehaviorDetector for NailBitingDetector {
             // Normalize distance by face width.
             let normalized_dist = distance / fw;
             let curl = finger_curl_ratio(hand);
+
+            // Drinking suppression: when a hand is wrapped around an
+            // object (cup, bottle, mug) all five fingertips cluster
+            // tightly, unlike biting where one fingertip is isolated at
+            // the mouth and the rest dangle. Only suppress when the hand
+            // is actually near the mouth — a clustered grip elsewhere
+            // wouldn't have fired biting anyway.
+            if normalized_dist <= self.proximity_threshold
+                && is_gripping_object(hand, fw)
+            {
+                debug!(hand = hand_idx, "NailBiting: gripping-object (drinking) suppression");
+                explanation.suppressions.push(SuppressionReason::GrippingObject);
+                explanation.hands.push(HandSignal {
+                    hand_index: hand_idx,
+                    side: hand.side,
+                    normalized_distance: normalized_dist,
+                    distance_threshold: self.proximity_threshold,
+                    contributing_fingertip: Some(tip_idx),
+                    partner_fingertip: None,
+                    curl: Some(curl),
+                    bonus: 0.0,
+                    confidence: 0.0,
+                });
+                continue;
+            }
 
             // Suppress chin rest: hand near face but fingers extended AND
             // fingertips not close to mouth. If a fingertip IS near the mouth,

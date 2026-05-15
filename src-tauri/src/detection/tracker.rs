@@ -50,6 +50,12 @@ pub struct BehaviorTracker {
     confidence_threshold: f32,
     /// Cooldown duration after alert is dismissed/completed.
     cooldown_duration: Duration,
+    /// Minimum elapsed time the behavior must remain positive in the
+    /// Accumulating phase before promotion to Confirmed. This is the
+    /// "behavior must continue for N seconds" floor that rejects brief
+    /// incidental gestures (head-scratching, lip-touching) which never
+    /// sustain long enough to clear it.
+    min_sustained_duration: Duration,
     /// When the current phase started.
     phase_started_at: Instant,
     /// Camera ID for the most recent detection (for event construction).
@@ -70,6 +76,7 @@ impl BehaviorTracker {
         positive_ratio: f32,
         confidence_threshold: f32,
         cooldown_duration: Duration,
+        min_sustained_duration: Duration,
     ) -> Self {
         Self {
             bfrb_type,
@@ -79,6 +86,7 @@ impl BehaviorTracker {
             positive_ratio,
             confidence_threshold,
             cooldown_duration,
+            min_sustained_duration,
             phase_started_at: Instant::now(),
             last_camera_id: String::new(),
             peak_confidence: 0.0,
@@ -171,17 +179,19 @@ impl BehaviorTracker {
         match self.phase {
             TrackingPhase::Idle => {
                 let conf = confidence.unwrap_or(0.0);
-                if window_mature && current_ratio >= self.positive_ratio {
-                    self.transition_to(TrackingPhase::Confirmed, timestamp);
-                    Some(self.make_event(timestamp))
-                } else if conf >= self.confidence_threshold {
+                // The direct Idle → Confirmed path used to fire as soon as
+                // the window matured with enough positives, bypassing any
+                // sustained-duration requirement. That let brief incidental
+                // gestures (head scratch, lip touch) alert on the first
+                // matured window. Always route a fresh positive through
+                // Accumulating so it has to live through
+                // `min_sustained_duration` before promoting.
+                if conf >= self.confidence_threshold {
                     self.transition_to(TrackingPhase::Accumulating, timestamp);
                     self.peak_confidence = conf;
                     self.peak_explanation = explanation.clone();
-                    None
-                } else {
-                    None
                 }
+                None
             }
             TrackingPhase::Accumulating => {
                 let conf = confidence.unwrap_or(0.0);
@@ -191,7 +201,11 @@ impl BehaviorTracker {
                         self.peak_explanation = explanation.clone();
                     }
                 }
-                if window_mature && current_ratio >= self.positive_ratio {
+                let elapsed_in_phase = timestamp.duration_since(self.phase_started_at);
+                if window_mature
+                    && current_ratio >= self.positive_ratio
+                    && elapsed_in_phase >= self.min_sustained_duration
+                {
                     self.transition_to(TrackingPhase::Confirmed, timestamp);
                     Some(self.make_event(timestamp))
                 } else if current_ratio == 0.0 {
@@ -229,16 +243,22 @@ impl BehaviorTracker {
                     );
                 }
 
-                // Auto-stop: transition to Idle when behavior ceases.
-                // Uses Idle (not Cooldown) so re-detection is immediate.
+                // Auto-stop: when the behavior ceases on its own, enter
+                // Cooldown so the configured `cooldown_seconds` window has
+                // to elapse before another alert can fire for the same
+                // behavior. Going straight back to Idle (the earlier
+                // behavior) let a brief stop-and-restart fire a second
+                // notification on the same physical biting/picking
+                // episode — exactly the "got 2 notifications again"
+                // symptom.
                 if window_mature && current_ratio < self.positive_ratio {
                     info!(
                         bfrb = %self.bfrb_type,
                         positive_ratio = current_ratio,
                         required_ratio = self.positive_ratio,
-                        "Behavior stopped, ending alert"
+                        "Behavior stopped, entering cooldown"
                     );
-                    self.transition_to(TrackingPhase::Idle, timestamp);
+                    self.transition_to(TrackingPhase::Cooldown, timestamp);
                 }
                 None
             }
@@ -442,6 +462,7 @@ impl DetectionTracker {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
 
@@ -452,6 +473,7 @@ mod tests {
             0.7,  // 70% positive ratio
             0.5,  // confidence threshold
             Duration::from_secs(5),
+            Duration::from_millis(0), // tests don't gate on sustained duration
         )
     }
 
@@ -540,6 +562,7 @@ mod tests {
             0.7,
             0.5,
             Duration::from_millis(100), // Short cooldown for testing.
+            Duration::from_millis(0),   // tests don't gate on sustained duration
         );
         let start = Instant::now();
 
@@ -604,6 +627,7 @@ mod tests {
                 0.7,
                 0.5,
                 Duration::from_secs(5),
+                Duration::from_millis(0),
             ),
             BehaviorTracker::new(
                 BfrbType::NailPicking,
@@ -611,6 +635,7 @@ mod tests {
                 0.7,
                 0.5,
                 Duration::from_secs(5),
+                Duration::from_millis(0),
             ),
         ]);
 
@@ -645,6 +670,7 @@ mod tests {
             0.7,
             0.5,
             Duration::from_secs(5),
+            Duration::from_millis(0),
         )]);
 
         let start = Instant::now();
@@ -699,11 +725,16 @@ mod tests {
             tracker.update(Some(0.0), ts, "cam0");
         }
 
-        // Should have auto-transitioned to Idle (not Cooldown) for instant re-detection.
+        // Should have auto-transitioned to Cooldown (not Idle): the
+        // `cooldown_seconds` setting is what stops a brief
+        // stop-and-restart of the same behaviour from firing a fresh
+        // alert milliseconds after the first ended. Idle here would let
+        // the next frame re-arm the tracker immediately and the user
+        // sees two notifications for one episode.
         assert_eq!(
             tracker.phase(),
-            TrackingPhase::Idle,
-            "Alerting should auto-stop to Idle when behavior ceases"
+            TrackingPhase::Cooldown,
+            "Alerting should auto-stop to Cooldown when behavior ceases"
         );
     }
 

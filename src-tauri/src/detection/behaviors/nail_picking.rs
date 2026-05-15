@@ -10,7 +10,8 @@ use tracing::debug;
 
 use crate::config::BehaviorConfig;
 use crate::detection::analyzer::{
-    is_pinching, is_typing_posture, landmark_distance_2d, min_inter_hand_fingertip_distance,
+    is_pinching, is_stretching_posture, is_typing_posture, landmark_distance_2d,
+    min_inter_hand_fingertip_distance,
 };
 use crate::detection::behaviors::BehaviorDetector;
 use crate::detection::types::{
@@ -173,6 +174,16 @@ impl BehaviorDetector for NailPickingDetector {
         {
             debug!("NailPicking: typing posture suppression");
             explanation.suppressions.push(SuppressionReason::TypingPosture);
+            return Some((0.0, explanation));
+        }
+
+        // Arm-stretching suppression — both hands fully open isn't a
+        // picking gesture. Picking has at least one curled / pinching
+        // hand, so when both register near-full finger extension we know
+        // the user is just stretching.
+        if analysis.hands.len() >= 2 && is_stretching_posture(&analysis.hands) {
+            debug!("NailPicking: stretching posture suppression");
+            explanation.suppressions.push(SuppressionReason::StretchingPosture);
             return Some((0.0, explanation));
         }
 

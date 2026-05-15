@@ -1,4 +1,5 @@
 import type {
+  BfrbType,
   DetectionExplanation,
   HandSignal,
   SuppressionReason,
@@ -82,11 +83,11 @@ function HandSignalRow({ signal }: HandSignalRowProps) {
   const fired = signal.confidence > 0;
   return (
     <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="flex items-baseline gap-1.5">
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="flex min-w-0 items-center gap-1.5">
           <span
             className={cn(
-              "rounded px-1 font-mono text-[10px]",
+              "shrink-0 rounded px-1 font-mono text-[10px]",
               fired
                 ? "bg-primary/20 text-primary"
                 : "bg-muted text-muted-foreground",
@@ -94,7 +95,7 @@ function HandSignalRow({ signal }: HandSignalRowProps) {
           >
             {formatSide(signal.side)}
           </span>
-          <span className="text-muted-foreground">
+          <span className="truncate text-muted-foreground">
             {formatFingertip(signal.contributing_fingertip)}
             {signal.partner_fingertip !== null && (
               <>
@@ -106,7 +107,7 @@ function HandSignalRow({ signal }: HandSignalRowProps) {
         </span>
         <span
           className={cn(
-            "tabular-nums",
+            "shrink-0 tabular-nums",
             fired ? "font-medium text-foreground" : "text-muted-foreground",
           )}
         >
@@ -118,67 +119,113 @@ function HandSignalRow({ signal }: HandSignalRowProps) {
         distance={signal.normalized_distance}
         threshold={signal.distance_threshold}
       />
-      {(signal.curl !== null || signal.bonus > 0) && (
-        <div className="flex justify-end gap-2 text-[10px] text-muted-foreground tabular-nums">
-          {signal.curl !== null && <span>curl {signal.curl.toFixed(2)}</span>}
-          {signal.bonus > 0 && <span>+{signal.bonus.toFixed(2)} pinch</span>}
-          <span>
-            ratio {ratio.toFixed(2)}
-          </span>
-        </div>
-      )}
+      {/* The stats sub-row is always rendered (even when curl/bonus
+          are missing) so the row height is constant; missing values
+          show an em dash. Without this guarantee, a hand swinging
+          between "has curl" and "no curl" would shift everything
+          below it by one line. */}
+      <div className="flex justify-end gap-2 text-[10px] text-muted-foreground tabular-nums">
+        <span>curl {signal.curl !== null ? signal.curl.toFixed(2) : "—"}</span>
+        <span>+{signal.bonus.toFixed(2)} pinch</span>
+        <span>ratio {ratio.toFixed(2)}</span>
+      </div>
     </div>
   );
 }
 
-interface DetectorBlockProps {
-  explanation: DetectionExplanation;
-  /** Compact = no border/padding wrapper, used inside a parent panel. */
-  compact?: boolean;
-}
-
-function DetectorBlock({ explanation, compact }: DetectorBlockProps) {
-  const label = BFRB_LABELS[explanation.bfrb_type] ?? explanation.bfrb_type;
-  const hasHands = explanation.hands.length > 0;
-  const hasSuppressions = explanation.suppressions.length > 0;
+/**
+ * One detector's signal block. Layout is height-stable:
+ *   - Suppression chips reserve a single line of vertical space whether
+ *     or not any chips are visible.
+ *   - The hands area always renders exactly two rows so a detector
+ *     swinging between 0, 1, and 2 contributing hands doesn't shift
+ *     adjacent UI vertically.
+ *
+ * When the detector has no live explanation (e.g. it's enabled but
+ * isn't seeing the relevant body part right now), pass `explanation =
+ * null` and the block renders a dimmed placeholder in the same shape.
+ */
+function DetectorBlock({
+  bfrbType,
+  explanation,
+}: {
+  bfrbType: string;
+  explanation: DetectionExplanation | null;
+}) {
+  const label = BFRB_LABELS[bfrbType] ?? bfrbType;
+  const hands = explanation?.hands ?? [];
+  const suppressions = explanation?.suppressions ?? [];
+  const frameConfidence = explanation?.frame_confidence ?? 0;
   return (
-    <div className={cn(compact ? "space-y-2" : "space-y-2 rounded-lg border bg-card p-3")}>
+    <div
+      className={cn(
+        "flex flex-1 flex-col gap-2",
+        !explanation && "opacity-60",
+      )}
+    >
       <div className="flex items-baseline justify-between">
         <span className="font-medium">{label}</span>
         <span
           className={cn(
             "text-xs tabular-nums",
-            explanation.frame_confidence > 0
-              ? "text-foreground"
-              : "text-muted-foreground",
+            frameConfidence > 0 ? "text-foreground" : "text-muted-foreground",
           )}
         >
-          {(explanation.frame_confidence * 100).toFixed(0)}%
+          {(frameConfidence * 100).toFixed(0)}%
         </span>
       </div>
-      {hasSuppressions && (
-        <div className="flex flex-wrap gap-1">
-          {explanation.suppressions.map((s) => (
+      {/* Single-line, fixed-height suppression chip row. Overflow is
+          clipped rather than wrapped so two long suppression names
+          can never bump the block height. */}
+      <div className="flex h-[18px] items-center gap-1 overflow-hidden whitespace-nowrap">
+        {suppressions.length > 0 ? (
+          suppressions.map((s) => (
             <span
               key={s}
               className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
             >
               {SUPPRESSION_LABELS[s] ?? s}
             </span>
-          ))}
-        </div>
-      )}
-      {hasHands ? (
-        <div className="space-y-2">
-          {explanation.hands.map((h, i) => (
-            <HandSignalRow key={`${h.hand_index}-${i}`} signal={h} />
-          ))}
-        </div>
-      ) : (
-        !hasSuppressions && (
-          <div className="text-xs text-muted-foreground">no contributing hands</div>
-        )
-      )}
+          ))
+        ) : (
+          <span className="text-[10px] text-muted-foreground/0">·</span>
+        )}
+      </div>
+      <div className="space-y-2">
+        {[0, 1].map((slotIdx) => {
+          const h = hands[slotIdx];
+          return h ? (
+            <HandSignalRow key={`${h.hand_index}-${slotIdx}`} signal={h} />
+          ) : (
+            <PlaceholderHandRow key={`placeholder-${slotIdx}`} />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Height-matched placeholder for a missing hand slot. Same DOM shape as
+ *  HandSignalRow so the block height stays identical regardless of how
+ *  many hands are currently contributing. */
+function PlaceholderHandRow() {
+  return (
+    <div className="space-y-1 opacity-40">
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="flex items-baseline gap-1.5">
+          <span className="rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
+            —
+          </span>
+          <span className="text-muted-foreground">—</span>
+        </span>
+        <span className="tabular-nums text-muted-foreground">—</span>
+      </div>
+      <div className="h-1.5 w-full rounded bg-muted" />
+      <div className="flex justify-end gap-2 text-[10px] text-muted-foreground tabular-nums">
+        <span>curl —</span>
+        <span>+0.00 pinch</span>
+        <span>ratio —</span>
+      </div>
     </div>
   );
 }
@@ -194,39 +241,44 @@ export interface SignalsPanelProps {
   className?: string;
 }
 
-/** Renders the contributing signals for one or more detectors. */
+/** Detectors we always reserve space for in the panel. Order is fixed
+ *  so the row positions never reshuffle when a detector starts/stops
+ *  emitting explanations. New detectors get a new fixed slot here. */
+const PANEL_DETECTOR_SLOTS: readonly BfrbType[] = ["nail_biting", "nail_picking"];
+
+/** Renders the contributing signals for one or more detectors. The
+ *  panel reserves space for every known detector (see
+ *  `PANEL_DETECTOR_SLOTS`); detectors with no live explanation show a
+ *  dimmed placeholder so the height stays constant across frames.
+ *
+ *  When used inline (e.g. inside `AlertModal`) we drop the placeholder
+ *  rows and render only the detector that fired — the alert modal is
+ *  scoped to a single event, not a live monitoring view. */
 export function SignalsPanel({
   explanations,
   title,
   inline,
   className,
 }: SignalsPanelProps) {
-  const hasContent = explanations.length > 0;
+  const slots = inline
+    ? explanations.map((e) => e.bfrb_type)
+    : PANEL_DETECTOR_SLOTS;
+  const byType = new Map(explanations.map((e) => [e.bfrb_type, e]));
+  // Inline mode (AlertModal) lays out at natural height. Full mode
+  // (Preview panel) stretches to fill its parent so the detector
+  // blocks divide the available vertical space evenly — that keeps
+  // the panel's bottom edge aligned with the camera beside it.
   const content = (
-    <div className="space-y-3">
+    <div className={cn(inline ? "space-y-3" : "flex h-full flex-col gap-3")}>
       {title && <h3 className="font-semibold">{title}</h3>}
-      {hasContent ? (
-        explanations.map((exp) => (
-          <DetectorBlock
-            key={exp.bfrb_type}
-            explanation={exp}
-            compact={inline}
-          />
-        ))
-      ) : (
-        <div className="text-xs text-muted-foreground">
-          Waiting for detection signals…
-        </div>
-      )}
+      {slots.map((bfrbType) => (
+        <DetectorBlock
+          key={bfrbType}
+          bfrbType={bfrbType}
+          explanation={byType.get(bfrbType) ?? null}
+        />
+      ))}
     </div>
   );
-
-  if (inline) {
-    return <div className={className}>{content}</div>;
-  }
-  return (
-    <div className={cn("rounded-lg border bg-card p-4", className)}>
-      {content}
-    </div>
-  );
+  return <div className={cn("h-full", className)}>{content}</div>;
 }

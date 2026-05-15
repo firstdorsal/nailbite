@@ -457,6 +457,7 @@ fn save_frame_jpeg(frame: &Frame, path: &Path) -> Result<(), image::ImageError> 
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
     fn test_config(dir: &Path) -> HistoryConfig {

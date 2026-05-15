@@ -54,6 +54,29 @@ impl ModelSession {
             .with_intra_threads(ort_config.intra_op_num_threads as usize)
             .map_err(|e| InferenceError::Ort(e.to_string()))?
             .with_inter_threads(ort_config.inter_op_num_threads as usize)
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            // Trim ORT memory footprint.
+            //
+            // Each ONNX session normally builds its own BFCArena, which
+            // pre-reserves a multi-GB virtual range per session. With 6
+            // models loaded that adds up to ~80–100 GB of address space
+            // (VmSize) even though only ~350 MB is physically resident.
+            // System monitors and `htop` surface VmSize as "memory used",
+            // which is alarming even when it isn't.
+            //
+            //  * `use_env_allocators` makes all sessions share the
+            //    environment-level allocator instead of spinning up six.
+            //  * `memory_pattern(false)` skips the static allocation plan
+            //    that pre-allocates the maximum possible tensor shapes
+            //    upfront. We never benefit from it (fixed-size inputs).
+            //  * `enable_memory_arena_shrinkage=cpu:0` returns idle arena
+            //    blocks to the OS between inferences instead of pinning
+            //    them for the lifetime of the process.
+            .with_env_allocators()
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            .with_memory_pattern(false)
+            .map_err(|e| InferenceError::Ort(e.to_string()))?
+            .with_config_entry("session.memory.enable_memory_arena_shrinkage", "cpu:0")
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
 
         // Register execution providers if any GPU providers are available

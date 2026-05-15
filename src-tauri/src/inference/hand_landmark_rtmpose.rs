@@ -281,6 +281,7 @@ fn argmax(slice: &[f32]) -> (usize, f32) {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
 

@@ -22,7 +22,11 @@ const INPUT_SIZE: u32 = 192;
 /// false positives filtered by hand landmark model.
 const SCORE_THRESHOLD: f32 = 0.2;
 /// Increased to allow more overlapping detections - tracker handles duplicates.
-const NMS_THRESHOLD: f32 = 0.5;
+// 0.3 is more aggressive than the upstream MediaPipe default (0.5). With
+// the additional IoMin guard in `non_max_suppression`, this keeps the
+// palm detector from emitting two boxes on the same hand when one is
+// nested inside the other (palm + spread-fingers anchors firing at once).
+const NMS_THRESHOLD: f32 = 0.3;
 const NUM_KEYPOINTS: usize = 7;
 /// Expand palm bbox to capture full hand region.
 const HAND_ROI_SCALE: f32 = 2.6;

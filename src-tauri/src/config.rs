@@ -22,11 +22,7 @@ pub struct NailbiteConfig {
     #[serde(default)]
     pub actions: ActionsConfig,
     #[serde(default)]
-    pub exercises: ExercisesConfig,
-    #[serde(default)]
     pub hotkeys: HotkeysConfig,
-    #[serde(default)]
-    pub training: TrainingConfig,
     #[serde(default)]
     pub history: HistoryConfig,
 }
@@ -83,6 +79,23 @@ pub struct ModelsConfig {
     pub face_mesh: PathBuf,
     #[serde(default = "default_pose_landmark_path")]
     pub pose_landmark: PathBuf,
+}
+
+impl ModelsConfig {
+    /// Mutable references to every model path. Used at startup to rebase
+    /// the defaulted relative paths (`./models/...`) against `$OWD` so the
+    /// AppImage launch path picks up the user's project-dir models rather
+    /// than the read-only AppImage tree.
+    pub fn all_paths_mut(&mut self) -> [&mut PathBuf; 6] {
+        [
+            &mut self.palm_detection,
+            &mut self.hand_landmark,
+            &mut self.hand_landmark_full,
+            &mut self.face_detection,
+            &mut self.face_mesh,
+            &mut self.pose_landmark,
+        ]
+    }
 }
 
 impl Default for ModelsConfig {
@@ -542,45 +555,6 @@ impl Default for WebhookConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ExercisesConfig {
-    #[serde(default)]
-    pub selection_strategy: SelectionStrategy,
-    #[serde(default)]
-    pub preferred_exercise: Option<String>,
-    #[serde(default)]
-    pub hold_duration_override: Option<u64>,
-    #[serde(default)]
-    pub reps_override: Option<u32>,
-    #[serde(default = "default_exercise_timeout")]
-    pub timeout_seconds: u64,
-    #[serde(default = "default_compliance_ratio")]
-    pub compliance_ratio: f32,
-}
-
-impl Default for ExercisesConfig {
-    fn default() -> Self {
-        Self {
-            selection_strategy: SelectionStrategy::default(),
-            preferred_exercise: None,
-            hold_duration_override: None,
-            reps_override: None,
-            timeout_seconds: default_exercise_timeout(),
-            compliance_ratio: default_compliance_ratio(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SelectionStrategy {
-    #[default]
-    Random,
-    First,
-    RoundRobin,
-    Preferred,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HotkeysConfig {
     #[serde(default = "default_dismiss_key")]
     pub dismiss_false_positive: String,
@@ -596,29 +570,6 @@ impl Default for HotkeysConfig {
             dismiss_false_positive: default_dismiss_key(),
             mark_missed_event: default_missed_key(),
             pause_resume: default_pause_key(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TrainingConfig {
-    #[serde(default)]
-    pub save_frames: bool,
-    #[serde(default = "default_true")]
-    pub save_landmarks: bool,
-    #[serde(default = "default_annotations_file")]
-    pub annotations_file: PathBuf,
-    #[serde(default = "default_frames_dir")]
-    pub frames_dir: PathBuf,
-}
-
-impl Default for TrainingConfig {
-    fn default() -> Self {
-        Self {
-            save_frames: false,
-            save_landmarks: true,
-            annotations_file: default_annotations_file(),
-            frames_dir: default_frames_dir(),
         }
     }
 }
@@ -771,12 +722,6 @@ fn default_notification_timeout_ms() -> u32 {
 fn default_webhook_timeout_ms() -> u64 {
     5000
 }
-fn default_exercise_timeout() -> u64 {
-    120
-}
-fn default_compliance_ratio() -> f32 {
-    0.8
-}
 fn default_dismiss_key() -> String {
     "F9".to_string()
 }
@@ -786,13 +731,6 @@ fn default_missed_key() -> String {
 fn default_pause_key() -> String {
     "F11".to_string()
 }
-fn default_annotations_file() -> PathBuf {
-    PathBuf::from("~/.local/share/nailbite/annotations.jsonl")
-}
-fn default_frames_dir() -> PathBuf {
-    PathBuf::from("~/.local/share/nailbite/frames/")
-}
-
 fn default_tracking_grace_frames() -> u8 {
     3
 }
@@ -830,9 +768,10 @@ fn default_nail_picking_config() -> BehaviorConfig {
 // --- Loading and validation ---
 
 impl NailbiteConfig {
-    pub fn load(path: &str) -> Result<Self, ConfigError> {
+    pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
         let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed {
-            path: path.to_string(),
+            path: path.display().to_string(),
             source: e,
         })?;
         let config: Self =
@@ -841,11 +780,12 @@ impl NailbiteConfig {
         Ok(config)
     }
 
-    pub fn save(&self, path: &str) -> Result<(), ConfigError> {
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), ConfigError> {
+        let path = path.as_ref();
         let contents = serde_yaml_ng::to_string(self)
             .map_err(|e| ConfigError::ParseFailed(e.to_string()))?;
         std::fs::write(path, contents).map_err(|e| ConfigError::WriteFailed {
-            path: path.to_string(),
+            path: path.display().to_string(),
             source: e,
         })?;
         Ok(())
@@ -860,12 +800,6 @@ impl NailbiteConfig {
             ));
         }
 
-        if self.exercises.compliance_ratio <= 0.0 || self.exercises.compliance_ratio > 1.0 {
-            return Err(ConfigError::Validation(
-                "exercises.compliance_ratio must be in (0.0, 1.0]".to_string(),
-            ));
-        }
-
         if self.actions.sound.volume < 0.0 || self.actions.sound.volume > 1.0 {
             return Err(ConfigError::Validation(
                 "actions.sound.volume must be in [0.0, 1.0]".to_string(),
@@ -875,15 +809,6 @@ impl NailbiteConfig {
         if self.actions.webhook.enabled && self.actions.webhook.url.is_empty() {
             return Err(ConfigError::Validation(
                 "actions.webhook.url must be set when webhook is enabled".to_string(),
-            ));
-        }
-
-        if self.exercises.selection_strategy == SelectionStrategy::Preferred
-            && self.exercises.preferred_exercise.is_none()
-        {
-            return Err(ConfigError::Validation(
-                "exercises.preferred_exercise must be set when selection_strategy is 'preferred'"
-                    .to_string(),
             ));
         }
 

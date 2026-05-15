@@ -88,16 +88,13 @@ echo "RUST_LOG=${RUST_LOG}"
 echo "=========================================="
 echo ""
 
-# Copy config.yaml next to the AppImage so the app finds it
-# (Tauri apps look for config relative to the executable's working directory)
-if [ -f "${PROJECT_DIR}/config.yaml" ]; then
-    cp "${PROJECT_DIR}/config.yaml" "${APPIMAGE_DIR}/config.yaml"
-fi
-
-# Run the AppImage
-# On NixOS, AppImages must be run through appimage-run because the standard
-# dynamic linker path (/lib64/ld-linux-x86-64.so.2) doesn't exist.
-cd "${APPIMAGE_DIR}"
+# Run from the project root so the app sees `config.yaml` and `./models/`.
+# `appimage-run` on NixOS launches via `bwrap --chdir <invoker cwd> ...`, so
+# the invoker's cwd determines what the app sees as `.`. The previous
+# `cd "${APPIMAGE_DIR}"` made config + cached models invisible to the app,
+# which forced re-download on every launch and printed a misleading
+# "Failed to read config file config.yaml" warning.
+cd "${PROJECT_DIR}"
 
 if command -v appimage-run &>/dev/null; then
     RUST_LOG="${RUST_LOG}" exec appimage-run "${APPIMAGE}"

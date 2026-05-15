@@ -82,29 +82,6 @@ export interface FrameResult {
   paused: boolean;
 }
 
-export interface Exercise {
-  id: string;
-  name: string;
-  instructions: string;
-  category: "timed_hold" | "repetitions";
-  hold_duration_secs: number;
-  target_reps: number;
-}
-
-export interface VerificationResult {
-  pose_correct: boolean;
-  feedback: string;
-  progress: number;
-}
-
-export interface ExerciseSession {
-  exercise: Exercise;
-  started_at: string;
-  completed: boolean;
-  progress: number;
-  current_rep: number;
-}
-
 // Config types
 export interface GeneralConfig {
   log_level: string;
@@ -219,26 +196,10 @@ export interface ActionsConfig {
   visual: VisualConfig;
 }
 
-export interface ExercisesConfig {
-  selection_strategy: "random" | "first" | "round_robin" | "preferred";
-  preferred_exercise: string | null;
-  hold_duration_override: number | null;
-  reps_override: number | null;
-  timeout_seconds: number;
-  compliance_ratio: number;
-}
-
 export interface HotkeysConfig {
   dismiss_false_positive: string;
   mark_missed_event: string;
   pause_resume: string;
-}
-
-export interface TrainingConfig {
-  save_frames: boolean;
-  save_landmarks: boolean;
-  annotations_file: string;
-  frames_dir: string;
 }
 
 export interface NailbiteConfig {
@@ -249,24 +210,20 @@ export interface NailbiteConfig {
   detection: DetectionConfig;
   fusion: FusionConfig;
   actions: ActionsConfig;
-  exercises: ExercisesConfig;
   hotkeys: HotkeysConfig;
-  training: TrainingConfig;
 }
 
 // Stats types
 export interface SessionEntry {
   timestamp: string;
-  event_type: "detection" | "exercise_completed" | "dismissed" | "missed";
+  event_type: "detection" | "dismissed" | "missed";
   bfrb_type?: BfrbType;
-  exercise_id?: string;
   duration_secs?: number;
 }
 
 export interface SessionStats {
   entries: SessionEntry[];
   total_detections: number;
-  total_exercises_completed: number;
   total_dismissed: number;
   total_missed: number;
 }

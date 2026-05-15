@@ -103,7 +103,13 @@ pub fn decode_detections(
 /// Non-maximum suppression on a list of detections.
 ///
 /// Iterates detections by score (highest first), suppressing overlapping boxes.
-/// Indexing is bounded by `keep.len() == detections.len()` and loop range.
+/// Suppression triggers when EITHER the IoU exceeds `iou_threshold`, OR the
+/// intersection covers more than `IOMIN_THRESHOLD` of the smaller box. The
+/// second check catches the failure mode where palm detection fires twice
+/// on the same hand with nested bboxes (a tight box inside a loose one) —
+/// pure IoU is dominated by the larger box's area in that case and lets
+/// the duplicate through.
+const IOMIN_THRESHOLD: f32 = 0.6;
 #[allow(clippy::indexing_slicing)]
 pub fn non_max_suppression(detections: &mut Vec<Detection>, iou_threshold: f32) {
     detections.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -118,7 +124,9 @@ pub fn non_max_suppression(detections: &mut Vec<Detection>, iou_threshold: f32) 
             if !keep[j] {
                 continue;
             }
-            if iou(&detections[i].bbox, &detections[j].bbox) > iou_threshold {
+            let a = &detections[i].bbox;
+            let b = &detections[j].bbox;
+            if iou(a, b) > iou_threshold || iomin(a, b) > IOMIN_THRESHOLD {
                 keep[j] = false;
             }
         }
@@ -130,6 +138,34 @@ pub fn non_max_suppression(detections: &mut Vec<Detection>, iou_threshold: f32) 
         idx += 1;
         k
     });
+}
+
+/// Intersection over the smaller box's area. Robust against nested
+/// bounding boxes that pure IoU under-penalizes.
+fn iomin(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let a_x1 = a[0] - a[2] / 2.0;
+    let a_y1 = a[1] - a[3] / 2.0;
+    let a_x2 = a[0] + a[2] / 2.0;
+    let a_y2 = a[1] + a[3] / 2.0;
+
+    let b_x1 = b[0] - b[2] / 2.0;
+    let b_y1 = b[1] - b[3] / 2.0;
+    let b_x2 = b[0] + b[2] / 2.0;
+    let b_y2 = b[1] + b[3] / 2.0;
+
+    let inter_w = (a_x2.min(b_x2) - a_x1.max(b_x1)).max(0.0);
+    let inter_h = (a_y2.min(b_y2) - a_y1.max(b_y1)).max(0.0);
+    let inter_area = inter_w * inter_h;
+
+    let a_area = a[2] * a[3];
+    let b_area = b[2] * b[3];
+    let min_area = a_area.min(b_area);
+
+    if min_area <= 0.0 {
+        0.0
+    } else {
+        inter_area / min_area
+    }
 }
 
 /// Compute Intersection over Union between two center-format bounding boxes.

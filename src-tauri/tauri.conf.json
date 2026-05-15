@@ -15,8 +15,8 @@
       {
         "title": "Nailbite - BFRB Detection",
         "label": "main",
-        "width": 1024,
-        "height": 720,
+        "width": 2200,
+        "height": 1400,
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,

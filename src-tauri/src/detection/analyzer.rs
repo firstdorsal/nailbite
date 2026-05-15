@@ -194,10 +194,20 @@ pub fn is_typing_posture(hands: &[HandDetection]) -> bool {
         return false;
     }
 
-    // Wrists horizontally separated (typical keyboard span ≥ ~20% of frame
-    // width). Picking brings hands close horizontally; typing keeps them
-    // apart on the home row.
-    if (w0.x - w1.x).abs() < 0.20 {
+    // Wrists in the lower portion of the frame — typing sits at desk /
+    // keyboard level, not raised toward the face. The 0.55 floor is
+    // chosen to admit keyboard-level hands on a typical webcam framing
+    // while still rejecting hands brought up to the chest or mouth.
+    if w0.y < 0.55 || w1.y < 0.55 {
+        return false;
+    }
+
+    // Wrists must not be touching across hands — picking brings them
+    // very close, typing always leaves at least a small gap. 0.08 is
+    // tight enough to cover narrow laptop keyboards (where hands can
+    // sit ~10-15 % of frame width apart) without admitting picking,
+    // where the hands meet or overlap.
+    if (w0.x - w1.x).abs() < 0.08 {
         return false;
     }
 
@@ -214,6 +224,63 @@ pub fn is_typing_posture(hands: &[HandDetection]) -> bool {
     }
 
     true
+}
+
+/// Detect an arm-stretch posture: both hands fully open with fingers
+/// extended. Picking always involves at least one curled / pinching hand
+/// (the thumb-and-finger approach), so a frame where both hands have
+/// extension ≈ 1.0 is the user stretching, not picking.
+///
+/// We deliberately don't look at where the hands are in the frame — users
+/// stretch overhead, sideways, in front of themselves; the open-palm
+/// finger signature is what's invariant.
+pub fn is_stretching_posture(hands: &[HandDetection]) -> bool {
+    if hands.len() < 2 {
+        return false;
+    }
+    // Both hands need essentially every finger extended. Picking gestures
+    // never satisfy this — even a "pinching" hand has the thumb curled
+    // toward the index finger.
+    hands.iter().all(|h| finger_extension_ratio(h) >= 0.75)
+}
+
+/// Detect a power-grip pose (e.g. holding a cup or bottle): all five
+/// fingertips clustered close together as if wrapping around an object.
+///
+/// Biting brings one fingertip in isolation to the mouth; the others
+/// sit substantially further away. Drinking from a cup curls every
+/// finger around the cup rim, so all five tips sit within a tight
+/// bounding circle. This helper detects that clustering and is used
+/// by the biting detector to suppress drinking false positives.
+///
+/// `scale` is a normalising length (typically face width); the
+/// clustering threshold scales with it so the check is camera-distance
+/// invariant.
+pub fn is_gripping_object(hand: &HandDetection, scale: f32) -> bool {
+    if scale <= 0.0 {
+        return false;
+    }
+    let mut max_pair = 0.0_f32;
+    for (i, &tip_a) in FINGERTIP_INDICES.iter().enumerate() {
+        let Some(a) = hand.landmarks.get(tip_a) else {
+            continue;
+        };
+        for &tip_b in FINGERTIP_INDICES.iter().skip(i + 1) {
+            let Some(b) = hand.landmarks.get(tip_b) else {
+                continue;
+            };
+            let d = landmark_distance_2d(a, b);
+            if d > max_pair {
+                max_pair = d;
+            }
+        }
+    }
+    // All five tips within 35 % of face width of each other => the hand
+    // is in a tight grip rather than a finger-isolated biting / picking
+    // gesture. Empirically a biting hand's tip spread is ≥ ~50 % of face
+    // width because at least one finger is at the mouth while the others
+    // dangle below the chin.
+    (max_pair / scale) < 0.35
 }
 
 /// Detect chin rest posture: wrist/palm near face with fingers NOT at mouth.

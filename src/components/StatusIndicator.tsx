@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-export type Status = "normal" | "alert" | "paused" | "offline";
+export type Status = "normal" | "alert" | "paused" | "offline" | "absent";
 
 interface StatusIndicatorProps {
   status: Status;
@@ -35,6 +35,12 @@ const statusConfig: Record<
   offline: {
     color: "bg-gray-500",
     label: "Offline",
+    pulse: false,
+  },
+  absent: {
+    // Mirrors `TrayState::Absent` in src-tauri/src/tray.rs — keep colors in sync.
+    color: "bg-gray-700",
+    label: "No one in frame",
     pulse: false,
   },
 };

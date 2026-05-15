@@ -32,8 +32,9 @@ pub fn save_config(
     // Validate
     config.validate()?;
 
-    // Save to file
-    config.save("config.yaml")?;
+    // Save to file. Honor `$OWD` so the AppImage launch path writes to the
+    // user's project-dir config.yaml, not the read-only AppImage tree.
+    config.save(crate::paths::resolve_data_path("config.yaml"))?;
 
     // Rebuild detectors based on new config
     let mut new_detectors: Vec<Box<dyn BehaviorDetector>> = Vec::new();
@@ -64,6 +65,7 @@ pub fn save_config(
             config.detection.temporal.positive_ratio,
             config.detection.behaviors.nail_biting.confidence_threshold,
             std::time::Duration::from_secs(config.general.cooldown_seconds),
+            std::time::Duration::from_millis(config.detection.behaviors.nail_biting.min_sustained_ms),
         ));
     }
     if config.detection.behaviors.nail_picking.enabled {
@@ -73,6 +75,7 @@ pub fn save_config(
             config.detection.temporal.positive_ratio,
             config.detection.behaviors.nail_picking.confidence_threshold,
             std::time::Duration::from_secs(config.general.cooldown_seconds),
+            std::time::Duration::from_millis(config.detection.behaviors.nail_picking.min_sustained_ms),
         ));
     }
     let new_tracker = DetectionTracker::new(new_trackers);

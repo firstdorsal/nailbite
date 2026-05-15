@@ -211,12 +211,18 @@ RUN mkdir -p /root/.cache/tauri && cd /root/.cache/tauri && \
     printf '\x00' | dd of=linuxdeploy-plugin-appimage.AppImage bs=1 count=1 seek=8 conv=notrunc 2>/dev/null
 
 # ---- Build Tauri bundles ----
+# `pnpm tauri build` re-invokes cargo, so we have to forward CARGO_FEATURES
+# through to it. Without the `-- ${CARGO_FEATURES}` forwarding the final
+# binary is CPU-only even when the earlier `cargo build` was compiled with
+# `--features amd-gpu` / `--features cuda` — the tauri-driven rebuild
+# silently drops the features and produces a release binary with the GPU
+# execution-provider cfg paths gated off.
 WORKDIR /app
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    pnpm tauri build --no-bundle && \
-    pnpm tauri build --bundles ${TAURI_BUNDLES}
+    pnpm tauri build --no-bundle -- ${CARGO_FEATURES} && \
+    pnpm tauri build --bundles ${TAURI_BUNDLES} -- ${CARGO_FEATURES}
 
 # ---- Inject ONNX Runtime into AppImage ----
 # The ort crate uses load-dynamic (dlopen) which is invisible to linuxdeploy.

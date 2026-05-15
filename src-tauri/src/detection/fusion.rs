@@ -89,6 +89,7 @@ fn timestamp_diff(a: Instant, b: Instant) -> Duration {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
     use crate::detection::types::{FaceDetection, HandDetection, Landmark};

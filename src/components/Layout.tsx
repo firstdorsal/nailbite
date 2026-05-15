@@ -34,7 +34,7 @@ const navItems = [
 
 export default function Layout({ children }: LayoutProps) {
   const { theme, setTheme } = useTheme();
-  const { alertActive, paused, setPaused, todayCount } = useDetection();
+  const { alertActive, paused, present, setPaused, todayCount } = useDetection();
   const { config } = useConfig();
 
   const [muted, setMuted] = useState(false);
@@ -73,6 +73,7 @@ export default function Layout({ children }: LayoutProps) {
   const getStatus = (): Status => {
     if (alertActive) return "alert";
     if (paused) return "paused";
+    if (!present) return "absent";
     return "normal";
   };
 

@@ -102,24 +102,10 @@ const mockConfig: NailbiteConfig = {
       enabled: true,
     },
   },
-  exercises: {
-    selection_strategy: "random",
-    preferred_exercise: null,
-    hold_duration_override: null,
-    reps_override: null,
-    timeout_seconds: 120,
-    compliance_ratio: 0.8,
-  },
   hotkeys: {
     dismiss_false_positive: "F9",
     mark_missed_event: "F10",
     pause_resume: "F11",
-  },
-  training: {
-    save_frames: false,
-    save_landmarks: true,
-    annotations_file: "~/.local/share/nailbite/annotations.jsonl",
-    frames_dir: "~/.local/share/nailbite/frames/",
   },
 };
 

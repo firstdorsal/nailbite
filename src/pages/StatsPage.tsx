@@ -5,7 +5,6 @@ import {
   RefreshCw,
   AlertTriangle,
   Activity,
-  CheckCircle,
   XCircle,
   AlertCircle,
 } from "lucide-react";
@@ -42,8 +41,6 @@ export default function StatsPage() {
     switch (eventType) {
       case "detection":
         return <Activity className="h-4 w-4 text-red-500" />;
-      case "exercise_completed":
-        return <CheckCircle className="h-4 w-4 text-green-500" />;
       case "dismissed":
         return <XCircle className="h-4 w-4 text-yellow-500" />;
       case "missed":
@@ -55,8 +52,6 @@ export default function StatsPage() {
     switch (entry.event_type) {
       case "detection":
         return `BFRB Detected: ${entry.bfrb_type?.replace("_", " ")}`;
-      case "exercise_completed":
-        return `Exercise Completed: ${entry.exercise_id}`;
       case "dismissed":
         return "Alert Dismissed";
       case "missed":
@@ -103,7 +98,7 @@ export default function StatsPage() {
       </div>
 
       {/* Summary cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-lg border bg-card p-4">
           <div className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-red-500" />
@@ -113,18 +108,6 @@ export default function StatsPage() {
           </div>
           <p className="mt-2 text-3xl font-bold">
             {stats?.total_detections || 0}
-          </p>
-        </div>
-
-        <div className="rounded-lg border bg-card p-4">
-          <div className="flex items-center gap-2">
-            <CheckCircle className="h-5 w-5 text-green-500" />
-            <span className="text-sm font-medium text-muted-foreground">
-              Exercises Done
-            </span>
-          </div>
-          <p className="mt-2 text-3xl font-bold">
-            {stats?.total_exercises_completed || 0}
           </p>
         </div>
 
