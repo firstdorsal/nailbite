@@ -11,14 +11,15 @@ Everything happens on your own machine. Nothing is uploaded.
 
 ## Why this exists
 
-BFRBs are common, often soothing, and usually not a moral failing — they're just hard to
-*notice* in the moment. The hand is at the mouth before the conscious mind catches up. A
-gentle external signal can close that gap, which is the whole idea behind the [habit-reversal
-training](https://en.wikipedia.org/wiki/Habit_reversal_training) and decoupling traditions
-this tool draws from.
+I needed something that would stop me from biting my nails while I'm sitting at
+my desk. By the time I notice my hand is at my mouth, it's already too late —
+the whole thing happens below the level of conscious attention. Nothing I tried
+(bitter polish, hair ties, sticky notes on the monitor) survived a deep work
+session. So I wrote this: a thing that watches the camera that's already
+pointing at me and gives me a quiet nudge the moment my hand goes the wrong way.
 
-Nailbite is a personal experiment, not a medical device. If you're working with a therapist on
-a BFRB, this can be a useful pair of extra eyes — but it isn't a substitute for that work.
+It's a personal tool, shared in case it's useful to someone else with the same
+problem. It is not a medical device, and it doesn't try to be one.
 
 ## What it does
 
