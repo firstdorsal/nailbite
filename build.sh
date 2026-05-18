@@ -50,13 +50,13 @@ echo "=========================================="
 ROCM_ORT="0"
 case "${GPU_BACKEND}" in
     cuda)
-        BASE_IMAGE="nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04"
+        BASE_IMAGE="nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04"
         CARGO_FEATURES="--features cuda"
         IMAGE_TAG="cuda"
         GPU_SUFFIX="cuda"
         ;;
     tensorrt)
-        BASE_IMAGE="nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04"
+        BASE_IMAGE="nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04"
         CARGO_FEATURES="--features nvidia-gpu"
         IMAGE_TAG="tensorrt"
         GPU_SUFFIX="tensorrt"
