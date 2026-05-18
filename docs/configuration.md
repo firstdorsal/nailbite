@@ -21,6 +21,15 @@ models:
 
 camera:
   inference_fps: 8             # Frames per second for inference
+  preview_fps: 24              # Live preview FPS (must be >= inference_fps)
+  controls:                    # Subject-friendly biases applied at capture start
+    auto_exposure: true
+    exposure_auto_priority: false   # Let exposure stretch in dim rooms
+    auto_white_balance: true
+    auto_gain: true
+    backlight_compensation_max: true
+    brightness_fraction: 0.60       # Fraction of [min,max], or null for camera default
+    contrast_fraction: 0.55
   sources:
     - id: main
       device: /dev/video0
@@ -116,9 +125,30 @@ training:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | inference_fps | int | 8 | Detection rate (higher = more CPU) |
+| preview_fps | int | 24 | Live preview FPS — must be `>= inference_fps` |
+| controls | object | see below | Subject-friendly camera biasing applied at capture start |
 | sources | array | - | Camera configurations |
 
+#### camera.controls
+
+Applied best-effort: unsupported V4L2 controls on a given camera are skipped, not fatal.
+Defaults are tuned so the user's face stays well-lit regardless of background lighting
+(e.g. a bright window behind the user).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| auto_exposure | bool | true | Let the driver track room brightness |
+| exposure_auto_priority | bool | false | When `true`, driver caps exposure to keep FPS up; setting `false` lets exposure stretch in dim rooms |
+| auto_white_balance | bool | true | Track ambient colour temperature |
+| auto_gain | bool | true | Track ambient gain |
+| backlight_compensation_max | bool | true | Pin backlight compensation to MAX so a bright window can't pull metering off your face |
+| brightness_fraction | float or null | 0.60 | Position within the control's `[min,max]` range, rounded to its step. `null` keeps the camera's own default. |
+| contrast_fraction | float or null | 0.55 | Same semantics as `brightness_fraction` |
+
+#### camera.sources
+
 Each camera source:
+
 | Field | Type | Description |
 |-------|------|-------------|
 | id | string | Unique identifier |

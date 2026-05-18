@@ -1,5 +1,7 @@
 //! Camera capture module for V4L2-based frame acquisition.
 
+pub mod controls;
+
 #[cfg(target_os = "linux")]
 mod v4l2;
 

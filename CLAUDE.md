@@ -11,6 +11,7 @@ BFRB (body-focused repetitive behavior) detection system.
 
 **Detection Pipeline:**
 - Camera capture via V4L2 (`v4l` crate) on Linux
+- Camera controls auto-tuned at capture start (auto-exposure on, frame-rate priority off, backlight compensation max, brightness lifted ~60 %) so the subject stays well-lit regardless of background lighting; configurable under `camera.controls`. Helpers + pure stepping math live in `src-tauri/src/camera/controls.rs`.
 - ONNX inference via `ort` crate (supports CPU, CUDA, TensorRT, ROCm, MIGraphX)
 - Models: Palm detection, hand landmarks (MediaPipe lite or RTMPose-m full), face detection, face mesh, pose landmarks
 - Detection runs on dedicated thread at configurable inference FPS (default 8)
@@ -132,6 +133,7 @@ nailbite/
 See `config.yaml` for all options. Key settings:
 
 - `camera.sources` - Camera devices and roles
+- `camera.controls` - Subject-friendly biasing applied at capture start (brightness/contrast fractions, backlight max, auto-exposure flags)
 - `detection.behaviors` - Enable/configure BFRB detectors
 - `detection.tracking` - Hand-tracker stability tuning
 - `ort.gpu` - GPU acceleration settings

@@ -29,6 +29,29 @@ camera:
     # inference. Higher = smoother preview, more bandwidth between Rust and the
     # webview. Must be >= inference_fps.
     preview_fps: 24
+    # Subject-friendly camera biasing applied at capture start. Each
+    # field maps to a V4L2 control and is best-effort: unsupported
+    # controls on a given camera are skipped, not fatal. Defaults
+    # were chosen so the user's face stays well-lit regardless of
+    # background lighting (e.g. a bright window behind the user).
+    controls:
+        # Auto-exposure ON so the camera tracks room brightness.
+        auto_exposure: true
+        # Frame-rate priority OFF — when this is true, the driver caps
+        # exposure time to keep FPS up and the subject ends up dark
+        # in dim rooms. Setting to false lets exposure stretch.
+        exposure_auto_priority: false
+        auto_white_balance: true
+        auto_gain: true
+        # Backlight compensation slammed to MAX so a bright window
+        # behind the user can't pull metering off their face.
+        backlight_compensation_max: true
+        # Brightness/contrast as a fraction of the control's [min,max]
+        # range, rounded to the nearest supported step. Set to null
+        # (or omit) to leave the camera's default. Both are clamped
+        # into [0.0, 1.0].
+        brightness_fraction: 0.60
+        contrast_fraction: 0.55
     sources:
         - id: main
           device: /dev/video0

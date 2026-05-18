@@ -140,6 +140,9 @@ pub struct CameraConfig {
     /// inference runs at a slower rate. Must be >= `inference_fps`.
     #[serde(default = "default_preview_fps")]
     pub preview_fps: u32,
+    /// Subject-friendly control biases applied at capture start.
+    #[serde(default)]
+    pub controls: CameraControlsConfig,
 }
 
 impl Default for CameraConfig {
@@ -148,8 +151,69 @@ impl Default for CameraConfig {
             sources: default_cameras(),
             inference_fps: default_inference_fps(),
             preview_fps: default_preview_fps(),
+            controls: CameraControlsConfig::default(),
         }
     }
+}
+
+/// Per-startup biases applied to the camera so the subject is well-lit
+/// regardless of background lighting.
+///
+/// Each field maps to a V4L2 control on Linux; `auto_*` flags simply
+/// request that the camera's own metering tracks scene changes,
+/// `*_fraction` values lift the captured frame above the neutral default,
+/// and `backlight_compensation_max` slams the corresponding UVC control
+/// to the device's maximum so a bright background can't drag the
+/// auto-exposure metering away from the user's face.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CameraControlsConfig {
+    /// Enable auto-exposure so the camera adapts to room brightness.
+    #[serde(default = "default_true")]
+    pub auto_exposure: bool,
+    /// Disable frame-rate priority so the camera can use long enough
+    /// exposures to expose the subject in dim rooms. When `false`, the
+    /// driver caps exposure time to maintain FPS and crushes shadows on
+    /// the user's face.
+    #[serde(default)]
+    pub exposure_auto_priority: bool,
+    /// Enable auto white-balance.
+    #[serde(default = "default_true")]
+    pub auto_white_balance: bool,
+    /// Enable auto gain.
+    #[serde(default = "default_true")]
+    pub auto_gain: bool,
+    /// Set backlight compensation to the device's maximum value.
+    #[serde(default = "default_true")]
+    pub backlight_compensation_max: bool,
+    /// Target brightness as a fraction of the control's [min, max] range.
+    /// `None` skips the brightness write and leaves the manufacturer default.
+    #[serde(default = "default_brightness_fraction")]
+    pub brightness_fraction: Option<f32>,
+    /// Target contrast as a fraction of the control's [min, max] range.
+    /// `None` skips the contrast write.
+    #[serde(default = "default_contrast_fraction")]
+    pub contrast_fraction: Option<f32>,
+}
+
+impl Default for CameraControlsConfig {
+    fn default() -> Self {
+        Self {
+            auto_exposure: true,
+            exposure_auto_priority: false,
+            auto_white_balance: true,
+            auto_gain: true,
+            backlight_compensation_max: true,
+            brightness_fraction: default_brightness_fraction(),
+            contrast_fraction: default_contrast_fraction(),
+        }
+    }
+}
+
+fn default_brightness_fraction() -> Option<f32> {
+    Some(0.60)
+}
+fn default_contrast_fraction() -> Option<f32> {
+    Some(0.55)
 }
 
 /// Individual camera source configuration.
@@ -878,6 +942,19 @@ impl NailbiteConfig {
             return Err(ConfigError::Validation(
                 "ort.gpu.device_id must be in range 0-7".to_string(),
             ));
+        }
+
+        for (label, value) in [
+            ("brightness_fraction", self.camera.controls.brightness_fraction),
+            ("contrast_fraction", self.camera.controls.contrast_fraction),
+        ] {
+            if let Some(v) = value {
+                if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                    return Err(ConfigError::Validation(
+                        format!("camera.controls.{label} must be in [0.0, 1.0]"),
+                    ));
+                }
+            }
         }
 
         Ok(())

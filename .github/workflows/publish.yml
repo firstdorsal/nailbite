@@ -73,6 +73,7 @@ jobs:
           name: nailbite-${{ matrix.gpu }}
           path: |
             ./dist/nailbite_*
+            ./dist/bundle/**/*.AppImage
             ./dist/bundle/**/*.deb
             ./dist/SHA256SUMS-*.txt
           if-no-files-found: error
@@ -101,7 +102,7 @@ jobs:
           find artifacts -type f | head -100
 
           # Collect all bundle files into release directory
-          find artifacts -type f -name "*.deb" -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.deb" -o -name "*.AppImage" \) -exec cp {} release/ \;
 
           # Collect all checksum files and merge them
           echo "# SHA256 Checksums for Nailbite v${VERSION}" > release/SHA256SUMS.txt
@@ -125,30 +126,54 @@ jobs:
           body: |
             ## Nailbite v${{ needs.validate.outputs.version }}
 
-            ### Downloads
+            Linux x86_64 desktop builds. Camera access uses V4L2; permission to read
+            `/dev/video*` is required (most users already have it via the `video` group).
 
-            Choose the Debian package matching your GPU:
+            ### Quick install
 
-            | GPU | Package |
-            |-----|---------|
-            | CPU (no GPU) | `nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.deb` |
-            | NVIDIA CUDA | `nailbite_${{ needs.validate.outputs.version }}_amd64-cuda.deb` |
-            | NVIDIA TensorRT | `nailbite_${{ needs.validate.outputs.version }}_amd64-tensorrt.deb` |
-            | AMD ROCm | `nailbite_${{ needs.validate.outputs.version }}_amd64-rocm.deb` |
-            | AMD MIGraphX | `nailbite_${{ needs.validate.outputs.version }}_amd64-migraphx.deb` |
+            **AppImage** (no install, runs on most distros — recommended for trying it out):
+
+            ```bash
+            curl -L -o nailbite.AppImage \
+              https://github.com/${{ github.repository }}/releases/download/v${{ needs.validate.outputs.version }}/nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.AppImage
+            chmod +x nailbite.AppImage
+            ./nailbite.AppImage
+            ```
+
+            **Debian / Ubuntu** (`.deb`):
+
+            ```bash
+            curl -L -o nailbite.deb \
+              https://github.com/${{ github.repository }}/releases/download/v${{ needs.validate.outputs.version }}/nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.deb
+            sudo apt install ./nailbite.deb
+            ```
+
+            ### Choose the right build for your hardware
+
+            | Hardware | AppImage | Debian package |
+            |----------|----------|----------------|
+            | CPU only | `nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.AppImage` | `nailbite_${{ needs.validate.outputs.version }}_amd64-cpu.deb` |
+            | NVIDIA (CUDA)   | `nailbite_${{ needs.validate.outputs.version }}_amd64-cuda.AppImage`     | `nailbite_${{ needs.validate.outputs.version }}_amd64-cuda.deb` |
+            | NVIDIA (TensorRT) | `nailbite_${{ needs.validate.outputs.version }}_amd64-tensorrt.AppImage` | `nailbite_${{ needs.validate.outputs.version }}_amd64-tensorrt.deb` |
+            | AMD (ROCm)      | `nailbite_${{ needs.validate.outputs.version }}_amd64-rocm.AppImage`     | `nailbite_${{ needs.validate.outputs.version }}_amd64-rocm.deb` |
+            | AMD (MIGraphX)  | `nailbite_${{ needs.validate.outputs.version }}_amd64-migraphx.AppImage` | `nailbite_${{ needs.validate.outputs.version }}_amd64-migraphx.deb` |
 
             ### Verification
 
-            Verify downloads using SHA256 checksums:
+            Verify downloads against the published checksums:
+
             ```bash
-            sha256sum -c SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt --ignore-missing
             ```
 
-            ### Runtime Requirements
+            ### Runtime requirements
 
-            - **CPU**: No additional requirements
-            - **CUDA/TensorRT**: NVIDIA driver 525+ with CUDA 12.x runtime
-            - **ROCm/MIGraphX**: AMD ROCm 6.0+ runtime
+            - **CPU**: no additional requirements
+            - **CUDA / TensorRT**: NVIDIA driver 525+ with CUDA 12.x runtime
+            - **ROCm / MIGraphX**: AMD ROCm 6.0+ runtime
+            - **AppImage on NixOS**: launch with `appimage-run` (or `nix-shell -p appimage-run --run "./nailbite.AppImage"`)
+            - **FUSE**: AppImages need FUSE; on Ubuntu 24.04 install `libfuse2t64`,
+              otherwise extract with `./nailbite.AppImage --appimage-extract` and run `./squashfs-root/AppRun`
 
           files: release/*
           fail_on_unmatched_files: true

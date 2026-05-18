@@ -107,6 +107,7 @@ pub fn start_camera(state: State<'_, Arc<AppState>>) -> Result<(), NailbiteError
             &source.device,
             source.resolution_width,
             source.resolution_height,
+            config.camera.controls.clone(),
         );
         camera
             .start()
@@ -259,8 +260,8 @@ const PRESENCE_FACE_STRONG_CONFIDENCE: f32 = 0.70;
 /// toward presence.
 const PRESENCE_POSE_VISIBILITY: f32 = 0.5;
 
-/// Minimum number of visible upper-body landmarks (out of nose + eyes
-/// + shoulders) for the pose model to vote "person here". Pulling eyes
+/// Minimum number of visible upper-body landmarks (out of nose, eyes,
+/// shoulders) for the pose model to vote "person here". Pulling eyes
 /// into the candidate set means a user sitting close to the desk —
 /// whose shoulders are below the frame — can still get a pose vote
 /// from the head region alone, instead of failing forever.
@@ -273,6 +274,15 @@ const POSE_LEFT_EYE: usize = 2;
 const POSE_RIGHT_EYE: usize = 5;
 const POSE_LEFT_SHOULDER: usize = 11;
 const POSE_RIGHT_SHOULDER: usize = 12;
+
+/// Sentinel value stored in `AppState::active_notification_id` while a
+/// notification is being built and not yet handed off to notify-rust.
+/// `0` is never a real XDG notification id, so reusing the same field
+/// for both states works without widening the type. The
+/// claim+publish-real-id sequence happens under `Mutex`, so the
+/// sentinel is observable only between the spawn-thread call and
+/// `notif.show()`'s return — exactly the window that used to race.
+const NOTIFICATION_CLAIM_SENTINEL: u32 = 0;
 
 fn face_votes_present(face: &Option<FaceDetection>) -> bool {
     face.as_ref()
@@ -801,19 +811,29 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                 });
                 let mut keep = vec![true; raw_hands.len()];
                 for i in 0..raw_hands.len() {
-                    if !keep[i] {
+                    if !keep.get(i).copied().unwrap_or(false) {
                         continue;
                     }
-                    let wi = &raw_hands[i].landmarks[WRIST_INDEX];
+                    let Some(hand_i) = raw_hands.get(i) else { continue };
+                    let Some(wrist_i) = hand_i.landmarks.get(WRIST_INDEX) else {
+                        continue;
+                    };
+                    let wrist_i_x = wrist_i.x;
+                    let wrist_i_y = wrist_i.y;
                     for j in (i + 1)..raw_hands.len() {
-                        if !keep[j] {
+                        if !keep.get(j).copied().unwrap_or(false) {
                             continue;
                         }
-                        let wj = &raw_hands[j].landmarks[WRIST_INDEX];
-                        let dx = wi.x - wj.x;
-                        let dy = wi.y - wj.y;
+                        let Some(hand_j) = raw_hands.get(j) else { continue };
+                        let Some(wrist_j) = hand_j.landmarks.get(WRIST_INDEX) else {
+                            continue;
+                        };
+                        let dx = wrist_i_x - wrist_j.x;
+                        let dy = wrist_i_y - wrist_j.y;
                         if (dx * dx + dy * dy).sqrt() < DUPLICATE_WRIST_DIST {
-                            keep[j] = false;
+                            if let Some(slot) = keep.get_mut(j) {
+                                *slot = false;
+                            }
                         }
                     }
                 }
@@ -1145,34 +1165,59 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                 if let Some(event) = alert_event {
                     let notif_cfg =
                         state.config.read().actions.notification.clone();
-                    // Cross-frame dedup: only spawn a notification when no
-                    // prior one is still outstanding. Without this, two
-                    // detectors tripping on consecutive frames each get
-                    // their own toast — and the second one renders without
-                    // the inline image because `build_alert_image` writes
-                    // to a temp path the OS notification daemon may not
-                    // have re-loaded yet. The first notification is the
-                    // user's labeling surface for the moment; suppressing
-                    // followups until they dismiss it keeps the UX clean.
-                    let already_notifying =
-                        state.active_notification_id.lock().is_some();
-                    if notif_cfg.enabled && !already_notifying {
-                        let state_for_notif = Arc::clone(&state);
-                        let bfrb = event.bfrb_type;
+                    // Cross-frame dedup: claim the notification slot
+                    // atomically. Two detectors tripping in consecutive
+                    // frames otherwise raced past the check-then-spawn
+                    // window and each fired their own toast — and the
+                    // second one rendered without the inline image
+                    // because `build_alert_image` had already overwritten
+                    // the predictable temp path. We read+write the slot
+                    // under one lock so only one event-loop iteration
+                    // can win the spawn; the sentinel id `0` marks
+                    // "claim made, real id pending" so other threads
+                    // see the slot as occupied even before notify-rust
+                    // returns the daemon's handle.
+                    let claimed = if notif_cfg.enabled {
+                        let mut guard = state.active_notification_id.lock();
+                        if guard.is_some() {
+                            false
+                        } else {
+                            *guard = Some(NOTIFICATION_CLAIM_SENTINEL);
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    if claimed {
                         let image_path = build_alert_image(
                             frame,
                             &hands,
                             face.as_ref(),
                             event.explanation.as_ref(),
                         );
-                        std::thread::spawn(move || {
-                            spawn_alert_notification(
-                                state_for_notif,
-                                bfrb,
-                                notif_cfg.timeout_ms,
-                                image_path,
+                        // Skip the notification entirely if we couldn't
+                        // produce an image — an imageless toast was a
+                        // recurring UX bug ("popup without picture").
+                        // Release the claim so the next event can take
+                        // the slot.
+                        if let Some(path) = image_path {
+                            let state_for_notif = Arc::clone(&state);
+                            let bfrb = event.bfrb_type;
+                            std::thread::spawn(move || {
+                                spawn_alert_notification(
+                                    state_for_notif,
+                                    bfrb,
+                                    notif_cfg.timeout_ms,
+                                    Some(path),
+                                );
+                            });
+                        } else {
+                            *state.active_notification_id.lock() = None;
+                            warn!(
+                                bfrb = %event.bfrb_type,
+                                "Could not produce alert image; skipping desktop notification"
                             );
-                        });
+                        }
                     }
 
                     if !state.muted.load(Ordering::Relaxed) {
@@ -1282,29 +1327,73 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
     info!("Detection loop stopped");
 }
 
-/// Get elapsed milliseconds as u64, saturating on overflow.
-/// Crop a zoomed-in PNG of the contributing action area and write it to a
-/// temp file. Returns the path on success.
+/// Render and save the notification-image companion for an alert.
 ///
-/// The crop is centered on the contributing fingertip (and its partner —
-/// either the mouth for nail biting or the partner fingertip for nail
-/// picking), padded so the relevant skin/face region is visible, then
-/// upscaled to ~256 px for a notification-sized thumbnail.
+/// The desktop notification daemon expects an on-disk PNG referenced
+/// by path (notify-rust's `image_path`). This function builds it.
+///
+/// Contract: returns `Some(path)` whenever *any* image was written.
+/// Internally it tries to produce a zoomed-in crop centered on the
+/// contributing landmarks (so the toast frames the actual action),
+/// and falls back to the raw frame on any failure (no contributing
+/// points, OOB indices, image-encode failure, write failure, …).
+/// The "never fire a notification without an image" contract upstream
+/// depends on this fallback being honored.
+///
+/// Path security: writes land in [`alert_image_directory`] with file
+/// mode `0o600` and a nanosecond-tagged filename, so concurrent alerts
+/// do not collide and the file is not world-readable.
 fn build_alert_image(
     frame: &crate::frame::Frame,
     hands: &[crate::detection::types::HandDetection],
     face: Option<&crate::detection::types::FaceDetection>,
     explanation: Option<&crate::detection::types::DetectionExplanation>,
 ) -> Option<std::path::PathBuf> {
-    use crate::detection::types::{BfrbType, INNER_LIP_INDICES};
     use image::{ImageBuffer, Rgb};
+    use std::borrow::Cow;
+
+    // Construct the source image *once*. Both the crop path and the
+    // fallback path need it; building it twice is a ~900 KB memcpy we
+    // can skip.
+    let source: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(frame.width, frame.height, frame.data.clone())?;
+
+    // Try the detailed crop first; it shares the source buffer with
+    // the fallback so we don't pay a second clone if it falls through.
+    let to_write: Cow<'_, ImageBuffer<Rgb<u8>, Vec<u8>>> =
+        match crop_for_alert(frame, hands, face, explanation, &source) {
+            Some(cropped) => Cow::Owned(cropped),
+            None => Cow::Borrowed(&source),
+        };
+
+    let destination = alert_image_destination()?;
+    write_png_user_only(to_write.as_ref(), &destination).ok()?;
+    prune_stale_alert_images(&destination);
+    Some(destination)
+}
+
+/// Render the cropped notification-thumbnail variant of the frame.
+///
+/// Returns `None` for any failure mode that should fall back to the
+/// full-frame image: missing explanation, no contributing landmarks,
+/// OOB indices, or degenerate crop geometry. Returns the cropped +
+/// upscaled image otherwise; the caller is responsible for writing it
+/// to disk.
+fn crop_for_alert(
+    frame: &crate::frame::Frame,
+    hands: &[crate::detection::types::HandDetection],
+    face: Option<&crate::detection::types::FaceDetection>,
+    explanation: Option<&crate::detection::types::DetectionExplanation>,
+    source: &image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+) -> Option<image::ImageBuffer<image::Rgb<u8>, Vec<u8>>> {
+    use crate::detection::types::{BfrbType, INNER_LIP_INDICES};
 
     let exp = explanation?;
-    // Collect the (x, y) points (in [0,1]) the crop must contain. Keep the
-    // set tight — just the contributing fingertip + its partner (mouth or
-    // other tip) — so the crop frames the action itself, not the whole
-    // hand. A minimum-side guarantee below prevents extreme close-ups when
-    // the contact is small.
+    // Collect the (x, y) points (in [0,1]) the crop must contain. Keep
+    // the set tight — just the contributing fingertip + its partner
+    // (mouth or other tip) — so the crop frames the action itself,
+    // not the whole hand. A minimum-side guarantee below prevents
+    // extreme close-ups when the contact is small.
     let mut points: Vec<(f32, f32)> = Vec::new();
 
     let strongest = exp
@@ -1317,8 +1406,8 @@ fn build_alert_image(
         })?;
 
     let from_hand = hands.get(strongest.hand_index)?;
-    let tip_idx = strongest.contributing_fingertip.unwrap_or(8);
-    let tip = from_hand.landmarks.get(tip_idx)?;
+    let tip_index = strongest.contributing_fingertip.unwrap_or(8);
+    let tip = from_hand.landmarks.get(tip_index)?;
     points.push((tip.x, tip.y));
 
     match exp.bfrb_type {
@@ -1327,24 +1416,25 @@ fn build_alert_image(
                 // Centre of the inner lip contour.
                 let mut sum_x = 0.0_f32;
                 let mut sum_y = 0.0_f32;
-                let mut n = 0u32;
+                let mut count = 0u32;
                 for &i in &INNER_LIP_INDICES {
-                    if let Some(lm) = face.landmarks.get(i) {
-                        sum_x += lm.x;
-                        sum_y += lm.y;
-                        n += 1;
+                    if let Some(landmark) = face.landmarks.get(i) {
+                        sum_x += landmark.x;
+                        sum_y += landmark.y;
+                        count += 1;
                     }
                 }
-                if n > 0 {
-                    points.push((sum_x / n as f32, sum_y / n as f32));
+                if count > 0 {
+                    points.push((sum_x / count as f32, sum_y / count as f32));
                 }
             }
         }
         BfrbType::NailPicking => {
-            if let Some(partner_idx) = strongest.partner_fingertip {
-                // For inter-hand picking, the partner tip is on the *other*
-                // hand. For same-hand picking it's the same hand.
-                let partner_hand_idx = exp
+            if let Some(partner_index) = strongest.partner_fingertip {
+                // For inter-hand picking, the partner tip is on the
+                // *other* hand. For same-hand picking it's the same
+                // hand.
+                let partner_hand_index = exp
                     .hands
                     .iter()
                     .find(|other| {
@@ -1357,9 +1447,11 @@ fn build_alert_image(
                     })
                     .map(|s| s.hand_index)
                     .unwrap_or(strongest.hand_index);
-                if let Some(partner_hand) = hands.get(partner_hand_idx) {
-                    if let Some(p) = partner_hand.landmarks.get(partner_idx) {
-                        points.push((p.x, p.y));
+                if let Some(partner_hand) = hands.get(partner_hand_index) {
+                    if let Some(partner_landmark) =
+                        partner_hand.landmarks.get(partner_index)
+                    {
+                        points.push((partner_landmark.x, partner_landmark.y));
                     }
                 }
             }
@@ -1371,90 +1463,198 @@ fn build_alert_image(
         return None;
     }
 
-    // Compute the bounding box in *pixel* space so the resulting crop is
-    // square in pixels too. Doing this in normalized 0..1 coordinates and
-    // then multiplying by (width, height) silently produces a 4:3 rectangle
-    // on a 640×480 frame, which the 512×512 resize would squash.
-    let fw = frame.width as f32;
-    let fh = frame.height as f32;
-    let smaller_dim = fw.min(fh);
+    // Compute the bounding box in *pixel* space so the resulting crop
+    // is square in pixels too. Doing this in normalized 0..1
+    // coordinates and then multiplying by (width, height) silently
+    // produces a 4:3 rectangle on a 640×480 frame, which the
+    // 1024×1024 resize would squash.
+    let frame_width = frame.width as f32;
+    let frame_height = frame.height as f32;
+    let smaller_dim = frame_width.min(frame_height);
 
-    let mut min_px = f32::INFINITY;
-    let mut min_py = f32::INFINITY;
-    let mut max_px = f32::NEG_INFINITY;
-    let mut max_py = f32::NEG_INFINITY;
-    for &(nx, ny) in &points {
-        let x = nx * fw;
-        let y = ny * fh;
-        if x < min_px { min_px = x; }
-        if y < min_py { min_py = y; }
-        if x > max_px { max_px = x; }
-        if y > max_py { max_py = y; }
+    let mut min_x_pixels = f32::INFINITY;
+    let mut min_y_pixels = f32::INFINITY;
+    let mut max_x_pixels = f32::NEG_INFINITY;
+    let mut max_y_pixels = f32::NEG_INFINITY;
+    for &(normalized_x, normalized_y) in &points {
+        let x = normalized_x * frame_width;
+        let y = normalized_y * frame_height;
+        if x < min_x_pixels { min_x_pixels = x; }
+        if y < min_y_pixels { min_y_pixels = y; }
+        if x > max_x_pixels { max_x_pixels = x; }
+        if y > max_y_pixels { max_y_pixels = y; }
     }
 
-    // Padding + minimum side, both expressed as a fraction of the frame's
-    // smaller dimension so the framing feels consistent regardless of the
-    // input resolution.
-    let pad_px = 0.07_f32 * smaller_dim;
-    let min_side_px = 0.40_f32 * smaller_dim;
-    let w_px = (max_px - min_px).max(0.0);
-    let h_px = (max_py - min_py).max(0.0);
-    let mut side_px = w_px.max(h_px) + pad_px * 2.0;
-    if side_px < min_side_px {
-        side_px = min_side_px;
+    // Padding + minimum side, both expressed as a fraction of the
+    // frame's smaller dimension so the framing feels consistent
+    // regardless of the input resolution.
+    let padding_pixels = 0.07_f32 * smaller_dim;
+    let min_side_pixels = 0.40_f32 * smaller_dim;
+    let width_pixels = (max_x_pixels - min_x_pixels).max(0.0);
+    let height_pixels = (max_y_pixels - min_y_pixels).max(0.0);
+    let mut side_pixels = width_pixels.max(height_pixels) + padding_pixels * 2.0;
+    if side_pixels < min_side_pixels {
+        side_pixels = min_side_pixels;
     }
-    if side_px > smaller_dim {
-        side_px = smaller_dim;
+    if side_pixels > smaller_dim {
+        side_pixels = smaller_dim;
     }
 
-    let cx_px = ((min_px + max_px) / 2.0).clamp(side_px / 2.0, fw - side_px / 2.0);
-    let cy_px = ((min_py + max_py) / 2.0).clamp(side_px / 2.0, fh - side_px / 2.0);
+    let center_x_pixels = ((min_x_pixels + max_x_pixels) / 2.0)
+        .clamp(side_pixels / 2.0, frame_width - side_pixels / 2.0);
+    let center_y_pixels = ((min_y_pixels + max_y_pixels) / 2.0)
+        .clamp(side_pixels / 2.0, frame_height - side_pixels / 2.0);
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let px = (cx_px - side_px / 2.0).round().max(0.0) as u32;
+    let pixel_x = (center_x_pixels - side_pixels / 2.0).round().max(0.0) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let py = (cy_px - side_px / 2.0).round().max(0.0) as u32;
+    let pixel_y = (center_y_pixels - side_pixels / 2.0).round().max(0.0) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let mut pw = side_px.round().max(1.0) as u32;
-    let mut ph = pw;
-    // Final guard: clamp to the actual frame (rounding could push 1px out).
-    if px + pw > frame.width { pw = frame.width.saturating_sub(px); }
-    if py + ph > frame.height { ph = frame.height.saturating_sub(py); }
-    let side_px_u = pw.min(ph);
-    pw = side_px_u;
-    ph = side_px_u;
-    if pw == 0 || ph == 0 {
+    let mut pixel_width = side_pixels.round().max(1.0) as u32;
+    let mut pixel_height = pixel_width;
+    // Final guard: clamp to the actual frame (rounding could push 1px
+    // out).
+    if pixel_x + pixel_width > frame.width {
+        pixel_width = frame.width.saturating_sub(pixel_x);
+    }
+    if pixel_y + pixel_height > frame.height {
+        pixel_height = frame.height.saturating_sub(pixel_y);
+    }
+    let square_side = pixel_width.min(pixel_height);
+    pixel_width = square_side;
+    pixel_height = square_side;
+    if pixel_width == 0 || pixel_height == 0 {
         return None;
     }
 
-    let raw = frame.data.clone();
-    let img: ImageBuffer<Rgb<u8>, _> =
-        ImageBuffer::from_raw(frame.width, frame.height, raw)?;
-
-    // Crop and upscale to a high-DPI size. KDE/Plasma scales the image
-    // down to fit the notification, so we want to ship enough pixels that
-    // the result still looks crisp at any reasonable display density.
-    // 1024 keeps the file under 1 MB at PNG-RGB but gives a sharp image
-    // even when the notification expands to a large preview.
-    let cropped = image::imageops::crop_imm(&img, px, py, pw, ph).to_image();
+    // Crop and upscale to a high-DPI size. KDE/Plasma scales the
+    // image down to fit the notification, so we want to ship enough
+    // pixels that the result still looks crisp at any reasonable
+    // display density. 1024 keeps the file under 1 MB at PNG-RGB but
+    // gives a sharp image even when the notification expands to a
+    // large preview.
+    let cropped = image::imageops::crop_imm(
+        source,
+        pixel_x,
+        pixel_y,
+        pixel_width,
+        pixel_height,
+    )
+    .to_image();
     let target = 1024u32;
-    let resized = image::imageops::resize(
+    Some(image::imageops::resize(
         &cropped,
         target,
         target,
         image::imageops::FilterType::CatmullRom,
-    );
+    ))
+}
 
-    // Write to a unique temp file. Use a stable name so the previous
-    // image is overwritten — avoids accumulation in /tmp.
-    let path = std::env::temp_dir().join(format!(
-        "nailbite-alert-{}.png",
-        std::process::id()
-    ));
-    if resized.save(&path).is_err() {
+/// Build the absolute path the next alert image should be written to.
+///
+/// Layout: `$XDG_RUNTIME_DIR/nailbite/alert-{ns}.png` on Linux when
+/// the runtime dir is set, otherwise `<temp>/nailbite/alert-{ns}.png`.
+/// Each call returns a fresh filename (monotonic nanos + PID) so two
+/// near-simultaneous alerts never race over the same path, and so
+/// PID reuse across daemon restarts cannot point us at a stale file
+/// a previous user might have created.
+fn alert_image_destination() -> Option<std::path::PathBuf> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let base = alert_image_directory()?;
+    // Best-effort dir create; if it already exists this is a no-op.
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        warn!(error = %e, dir = %base.display(), "Could not create alert-image dir");
         return None;
     }
-    Some(path)
+    // Restrict the directory itself to user-only access. AlreadyExists
+    // is fine — we only own the dir we created, but tightening the
+    // mode on a returned existing dir is cheap and idempotent.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&base) {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o077 != 0 {
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(&base, perms);
+            }
+        }
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    Some(base.join(format!("alert-{pid}-{nanos}.png")))
+}
+
+/// Return the directory alert images should live in. Honors
+/// `XDG_RUNTIME_DIR` when set (mode-0700 per spec), otherwise falls
+/// back to a `nailbite` subdir of the system temp dir.
+fn alert_image_directory() -> Option<std::path::PathBuf> {
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return Some(std::path::PathBuf::from(runtime_dir).join("nailbite"));
+        }
+    }
+    Some(std::env::temp_dir().join("nailbite"))
+}
+
+/// Write `img` as a PNG with user-only file permissions.
+///
+/// Uses `create_new` so we never silently overwrite a file pre-staged
+/// by another process (the predictable-PID symlink-attack vector from
+/// the old `/tmp/nailbite-alert-{pid}.png` layout). The PNG encoder
+/// streams into the open `File` handle.
+fn write_png_user_only(
+    img: &image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    let buffered = std::io::BufWriter::new(file);
+    let encoder = image::codecs::png::PngEncoder::new(buffered);
+    img.write_with_encoder(encoder)
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Delete alert PNGs in the same directory that are older than the
+/// longest plausible notification lifetime. Keeps the dir bounded
+/// without breaking notification daemons that may still hold the
+/// just-written file open.
+fn prune_stale_alert_images(just_written: &std::path::Path) {
+    use std::time::{Duration, SystemTime};
+
+    let Some(dir) = just_written.parent() else { return };
+    let max_age = Duration::from_secs(120);
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.path() == just_written {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if !name_str.starts_with("alert-") || !name_str.ends_with(".png") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(modified) = metadata.modified() else { continue };
+        if SystemTime::now()
+            .duration_since(modified)
+            .map(|age| age > max_age)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Show a desktop notification with built-in `Correct` / `False positive`
@@ -1496,14 +1696,19 @@ fn spawn_alert_notification(
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, "Failed to show desktop notification");
+            // Release the claim taken by the detection loop so the
+            // next event can try again. Without this the sentinel
+            // would stick and block every future notification.
+            *state.active_notification_id.lock() = None;
             return;
         }
     };
 
-    // Stash the notification id so the in-app modal's verdict / dismiss
-    // buttons can close the notification too. We still let
-    // `wait_for_action` consume the handle (it has to — that's the
-    // notify-rust API for blocking on action signals).
+    // Publish the real XDG id, overwriting the claim sentinel. The
+    // in-app AlertModal's verdict / dismiss buttons read this slot
+    // to close the notification too. We still let `wait_for_action`
+    // consume the handle (it has to — that's the notify-rust API
+    // for blocking on action signals).
     *state.active_notification_id.lock() = Some(handle.id());
 
     handle.wait_for_action(|action| {
@@ -1572,6 +1777,12 @@ pub fn close_active_notification(state: &AppState) {
         Some(i) => i,
         None => return,
     };
+    // The sentinel marks a claim made before notify-rust has returned
+    // a real handle id; "closing" id 0 would spawn a stray empty
+    // toast on some daemons, so just drop the claim and return.
+    if id == NOTIFICATION_CLAIM_SENTINEL {
+        return;
+    }
     use notify_rust::{Notification, Timeout};
     // Replace-by-id with a 1 ms timeout. The notification daemon
     // updates the existing notification (no new toast appears) and then
