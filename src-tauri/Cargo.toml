@@ -3,6 +3,9 @@ name = "nailbite-tauri"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/firstdorsal/nailbite"
+description = "A quiet local companion that gently notices when your hands wander to your face — BFRB awareness, on-device."
 
 [lib]
 name = "nailbite_lib"

@@ -2,6 +2,12 @@
   "name": "nailbite",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/firstdorsal/nailbite.git"
+  },
+  "description": "A quiet local companion that gently notices when your hands wander to your face — BFRB awareness, on-device.",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -44,6 +44,17 @@ a BFRB, this can be a useful pair of extra eyes — but it isn't a substitute fo
 - "Coaching" or gamification. By design — a counter that nudges you toward a number can turn
   into another source of shame, which is the opposite of what helps.
 
+## Screenshot
+
+<p align="center">
+  <img src="docs/images/hero.png" alt="Nailbite live preview with hand, face mesh, and pose torso landmarks overlaid; tray status reads 'Monitoring'" width="780">
+</p>
+
+The live preview during monitoring. Hand landmarks (green = left, orange = right)
+ride on top of the face mesh and pose torso so you can see exactly what the
+detector is seeing — useful when you're tuning thresholds, and reassuring when
+you want to know what is and isn't being tracked.
+
 ## Install
 
 Pre-built binaries are on the [Releases page](../../releases/latest) for every tagged
@@ -253,7 +264,12 @@ kinder over time.
 
 ## License
 
-MIT — see `LICENSE`.
+GNU Affero General Public License v3.0 — see `LICENSE`.
+
+In short: you're free to use, modify, and redistribute Nailbite. If you run a
+modified version as a network service, you have to make your source available
+to its users too. The aim is to keep the tool — and any improvements made to
+it — open for the community that depends on it.
 
 ## Acknowledgments
 
