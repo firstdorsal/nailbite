@@ -15,8 +15,12 @@ I needed something that would stop me from biting my nails while I'm sitting at
 my desk. By the time I notice my hand is at my mouth, it's already too late —
 the whole thing happens below the level of conscious attention. Nothing I tried
 (bitter polish, hair ties, sticky notes on the monitor) survived a deep work
-session. So I wrote this: a thing that watches the camera that's already
-pointing at me and gives me a quiet nudge the moment my hand goes the wrong way.
+session.
+
+What did work was having someone sitting next to me who would say "hey, you're
+doing it again." That's the role this tool is built to fill: a patient external
+observer that never gets tired, never judges, never makes a thing of it — just
+quietly says "hey" so I can put my hand back down and carry on.
 
 It's a personal tool, shared in case it's useful to someone else with the same
 problem. It is not a medical device, and it doesn't try to be one.
