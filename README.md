@@ -207,6 +207,56 @@ shape of the thing.
 - The only optional network feature is a webhook (disabled by default) so you can route alerts
   into your own systems if you want.
 
+## Research direction & looking for collaborators
+
+The current detector is **geometric**: it runs off-the-shelf hand, face, and
+pose landmark models on each frame and then asks rule-based questions of the
+landmark coordinates — "are any fingertips close to the outer-lip contour for
+at least 4 seconds, while the other hand isn't keyboard-shaped?". That works,
+and it's transparent (every alert ships an `explanation` field saying *which*
+signals contributed and *which* suppressions fired), but it's a ceiling:
+
+- Geometric proximity can't tell *biting* from *resting fingertip on lip*.
+- Per-frame rules don't capture the small temporal signature of the bite
+  itself (the brief inward jaw motion, the fingers pulling away).
+- Tuning is a manual sweep across thresholds, when the dataset already exists
+  to learn them.
+
+What I'd love to do — and what I'd love help with — is replace the geometric
+heuristic with a **small learned model**: probably a spatiotemporal CNN or a
+short-clip video transformer, taking the existing 11-frame clip plus the
+landmark traces as inputs and outputting a per-event probability for each
+behaviour. The labelled data is already being collected on every install:
+
+- Multi-frame clips (raw JPEGs + per-frame landmark traces) around every
+  alert and every user-marked missed event.
+- Per-event `verdict` labels (`true_positive` / `false_positive` / `unsure`)
+  added by the user through the same notification or hotkey that produced
+  the alert.
+
+Format and field-by-field schema are documented in
+[`docs/data-format.md`](docs/data-format.md).
+
+### Where I'd particularly love a second brain
+
+- **Dataset shape**: what makes this dataset usable for training vs. what's
+  missing (hard negatives, inter-rater agreement, privacy-preserving export
+  for cross-user pooling). Some of this is sketched at the bottom of
+  `data-format.md`.
+- **Model architecture**: clip-level vs. landmark-sequence vs. hybrid; how
+  much temporal context actually matters; whether per-behaviour heads share
+  a backbone.
+- **Federated / on-device fine-tuning**: the headline privacy property
+  (nothing leaves your machine) is the whole point of the project, so the
+  ideal training path is one that doesn't violate it — federated, fully
+  on-device, or aggressively-anonymised before any pooling.
+- **Evaluation**: more honest metrics than "the detector fires on the
+  recorded clips" — leave-one-user-out, calibration plots, time-to-detect.
+
+If any of that is your kind of fun, please open a discussion or an issue.
+This is genuinely a "would love to work with someone who knows what they're
+doing" ask, not a "PRs welcome" boilerplate.
+
 ## Build from source
 
 Required: Rust 1.88+, Node.js 22+, pnpm 10+.
