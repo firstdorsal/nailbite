@@ -143,9 +143,11 @@ These are open questions if you're thinking about training on this:
 - **Privacy-preserving export.** No tooling yet to export a labelled
   subset with faces blurred / dropped / replaced by landmarks-only. This
   is the obvious blocker for cross-user dataset sharing.
-- **Pose-only events.** When the presence gate is closed (no face / no
-  torso), the pipeline never reaches the behaviour detectors, so the
-  history under-represents partial-frame poses.
+- **Partial-frame poses.** When the user is half off-camera, palm
+  detection often fails entirely and the behaviour detectors never run.
+  The history is therefore biased toward well-framed scenes — the
+  hard real-world distribution of "hand in frame, body partly out" is
+  under-represented.
 
 ## Schema stability
 

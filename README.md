@@ -35,8 +35,6 @@ problem. It is not a medical device, and it doesn't try to be one.
   can be tuned to *your* hands over time.
 - **Keeps a short clip and the landmark trace** of each event in `~/.local/share/nailbite/` so
   you can review what happened if you want to — and delete it if you don't.
-- **Stays quiet when you're not in frame.** A multi-modal presence check (face mesh + torso
-  pose) gates the whole pipeline, so an empty chair never sets off the detector.
 - **Runs entirely locally.** No telemetry, no cloud, no account. The only network feature is
   an optional webhook that ships off by default.
 
@@ -156,11 +154,14 @@ A small taste:
 camera:
   inference_fps: 8
   controls:
+    gamma_reset: true               # reset gamma to driver default at startup
     auto_exposure: true
-    exposure_auto_priority: false   # let exposure stretch so dim rooms don't dim you
-    backlight_compensation_max: true
-    brightness_fraction: 0.60       # null disables this bias
-    contrast_fraction: 0.55
+    exposure_auto_priority: true    # let exposure stretch in dim / backlit scenes
+    auto_white_balance: true
+    auto_gain: true
+    backlight_compensation_max: false   # opt-in for backlit scenes only
+    brightness_fraction: null       # null = keep camera default
+    contrast_fraction: null
   sources:
     - id: main
       device: /dev/video0
@@ -171,7 +172,7 @@ detection:
     nail_biting:
       enabled: true
       proximity_threshold: 0.35
-      min_sustained_ms: 4000        # 4s of dwell before alerting
+      min_sustained_ms: 1000        # 1s of dwell before alerting
 
 ort:
   gpu:
@@ -183,10 +184,14 @@ See `docs/configuration.md` for the full reference.
 ## How it works under the hood
 
 1. **Camera** → frames pulled from V4L2.
-2. **AI** → a small stack of ONNX models (palm detection + hand landmarks, face detection +
-   mesh, pose landmarks) runs each frame.
-3. **Presence gate** → face mesh and pose torso landmarks both have to agree "user in frame"
-   before anything alerts.
+2. **Detection + rotation** → palm and face SSD models emit bounding boxes *and* keypoints
+   (palm: wrist + finger MCPs; face: eye line). The pipeline rotates each crop so the hand's
+   fingers point up and the face's eyes are horizontal before the landmark model sees it —
+   that's the distribution those models were trained on, and the single biggest factor in
+   how stable the predictions look frame-to-frame.
+3. **Landmarks** → hand (21 keypoints), face (468), pose (33) run on the rotated crops; the
+   outputs are inverse-rotated back into image space for visualisation and the behaviour
+   detectors.
 4. **Behaviour analysis** → temporal smoothing + per-hand explanations decide whether the
    geometry actually looks like nail biting or picking, rather than typing, eating, scratching
    an itch, or resting on a chin.

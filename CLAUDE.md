@@ -11,12 +11,12 @@ BFRB (body-focused repetitive behavior) detection system.
 
 **Detection Pipeline:**
 - Camera capture via V4L2 (`v4l` crate) on Linux
-- Camera controls auto-tuned at capture start (auto-exposure on, frame-rate priority off, backlight compensation max, brightness lifted ~60 %) so the subject stays well-lit regardless of background lighting; configurable under `camera.controls`. Helpers + pure stepping math live in `src-tauri/src/camera/controls.rs`.
+- Camera controls auto-tuned at capture start (gamma reset, auto-exposure with image priority, AWB / auto-gain on; brightness/contrast/backlight biases are opt-in). Configurable under `camera.controls`. Helpers + pure stepping math live in `src-tauri/src/camera/controls.rs`.
 - ONNX inference via `ort` crate (supports CPU, CUDA, TensorRT, ROCm, MIGraphX)
 - Models: Palm detection, hand landmarks (MediaPipe lite or RTMPose-m full), face detection, face mesh, pose landmarks
+- **Rotation-normalised crops** (`RotatedRoi` in `src-tauri/src/inference/preprocessing.rs`): palm SSD keypoints (wrist → middle-MCP) drive hand-crop rotation; BlazeFace keypoints (right-eye → left-eye) drive face-crop rotation. The landmark models need upright crops — without rotation, mouth landmarks and off-axis hands jitter visibly. Helpers `build_palm_rotated_roi` / `build_face_rotated_roi` in `src-tauri/src/commands/camera.rs`.
 - Detection runs on dedicated thread at configurable inference FPS (default 8)
 - Hand tracking for temporal consistency and left/right hand identity
-- Multi-modal presence gate (face mesh + pose torso landmarks must both agree) silences detection when the user is not in frame
 
 **Key Components:**
 - `src-tauri/src/` - Rust backend (Tauri commands, inference, detection)
@@ -27,7 +27,6 @@ BFRB (body-focused repetitive behavior) detection system.
 
 - All BFRB detectors implement the `BehaviorDetector` trait in `src-tauri/src/detection/behaviors/`
 - All actions implement the `Action` trait in `src-tauri/src/actions/`
-- Presence tracker (`PresenceTracker` in `src-tauri/src/commands/camera.rs`) gates the entire detection chain on a multi-signal "user in frame" vote with asymmetric hysteresis
 - Platform-specific code is behind traits with `#[cfg(target_os)]` gating
 - Linux-only for now (V4L2 camera), cross-platform support planned
 

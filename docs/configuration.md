@@ -53,12 +53,12 @@ detection:
     nail_biting:
       enabled: true
       proximity_threshold: 0.35  # Max distance from fingertip to mouth
-      min_sustained_ms: 1500     # How long behavior must persist
+      min_sustained_ms: 1000     # How long behavior must persist
       confidence_threshold: 0.3
     nail_picking:
       enabled: true
       proximity_threshold: 0.25
-      min_sustained_ms: 1500
+      min_sustained_ms: 1000
       confidence_threshold: 0.3
     hair_pulling:
       enabled: false

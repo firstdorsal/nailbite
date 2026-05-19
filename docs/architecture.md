@@ -94,11 +94,18 @@ Frontend                              Backend
 ## Detection Pipeline
 
 1. **Frame Capture** - V4L2 captures frames from webcam
-2. **Preprocessing** - Resize and normalize for ONNX models
-3. **Inference** - Run hand/face/pose detection models
-4. **Analysis** - Calculate spatial relationships (hand-to-mouth distance, etc.)
-5. **Temporal Tracking** - Confirm sustained behavior over time window
-6. **Alert Trigger** - Play sound, send webhook, show exercise
+2. **SSD Detection** - Palm + face short-range SSDs emit bounding boxes *and* keypoints
+3. **Rotation-Normalised Crops** - `RotatedRoi` aligns each crop along the wrist→middle-MCP axis
+   (hand) or the right-eye→left-eye axis (face). The MediaPipe-style landmark models are trained
+   on upright crops; axis-aligned bboxes alone produce unstable confidences on tilted hands and
+   visible jitter on lip / jaw landmarks. See `src-tauri/src/inference/preprocessing.rs` and the
+   helpers `build_palm_rotated_roi` / `build_face_rotated_roi` in
+   `src-tauri/src/commands/camera.rs`.
+4. **Landmark Inference** - Hand (21), face (468), pose (33) run on the rotated crops; outputs are
+   inverse-rotated back into image-normalised coordinates.
+5. **Analysis** - Calculate spatial relationships (hand-to-mouth distance, etc.)
+6. **Temporal Tracking** - Confirm sustained behavior over time window
+7. **Alert Trigger** - Play sound, send webhook, show exercise
 
 ## Data Flow
 
@@ -106,15 +113,15 @@ Frontend                              Backend
 Camera Frame
      │
      ▼
-┌────────────┐    ┌────────────┐    ┌────────────┐
-│   Palm     │───►│   Hand     │───►│  Behavior  │
-│ Detection  │    │ Landmark   │    │  Detector  │
-└────────────┘    └────────────┘    └────────────┘
-                                          │
-┌────────────┐    ┌────────────┐          │
-│   Face     │───►│   Face     │──────────┤
-│ Detection  │    │   Mesh     │          │
-└────────────┘    └────────────┘          │
+┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐
+│   Palm     │───►│  Rotation  │───►│   Hand     │───►│  Behavior  │
+│ Detection  │    │  (kp 0→2)  │    │ Landmark   │    │  Detector  │
+└────────────┘    └────────────┘    └────────────┘    └────────────┘
+                                                            │
+┌────────────┐    ┌────────────┐    ┌────────────┐          │
+│   Face     │───►│  Rotation  │───►│   Face     │──────────┤
+│ Detection  │    │  (eyes →)  │    │   Mesh     │          │
+└────────────┘    └────────────┘    └────────────┘          │
                                           ▼
                                    ┌────────────┐
                                    │  Temporal  │
