@@ -12,7 +12,7 @@ use crate::frame::Frame;
 use crate::detection::types::{HandDetection, HandSide, Landmark};
 use crate::errors::InferenceError;
 use crate::inference::hand_landmark_rtmpose::RtmPoseHandLandmarker;
-use crate::inference::preprocessing::{preprocess_roi, NormalizeRange};
+use crate::inference::preprocessing::{preprocess_rotated_nhwc, NormalizeRange, RotatedRoi};
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 224;
@@ -30,21 +30,23 @@ impl HandLandmarker {
         Self { session }
     }
 
-    /// Run hand landmark estimation on a cropped hand ROI.
+    /// Run hand landmark estimation on a rotation-normalised crop of the
+    /// frame.
     ///
-    /// `roi` is [x_min, y_min, x_max, y_max] in normalized coordinates.
-    /// Returns landmarks mapped back to full-frame coordinates.
+    /// The MediaPipe hand_landmark model is trained on crops where the
+    /// hand has been pre-rotated so the fingers point up. Callers compute
+    /// that rotation (typically from the palm detector's `wrist → middle
+    /// MCP` keypoints, or from `elbow → wrist` when only pose is
+    /// available) and pass it in via `roi`. Landmark outputs are inverse-
+    /// rotated back into image-normalised coordinates.
     pub fn estimate(
         &self,
         frame: &Frame,
-        roi: &[f32; 4],
+        roi: &RotatedRoi,
     ) -> Result<Option<HandDetection>, InferenceError> {
-        let (tensor, square_roi) = preprocess_roi(
+        let tensor = preprocess_rotated_nhwc(
             frame,
-            roi[0],
-            roi[1],
-            roi[2],
-            roi[3],
+            roi,
             INPUT_SIZE,
             NormalizeRange::ZeroOne,
         );
@@ -91,18 +93,28 @@ impl HandLandmarker {
             return Ok(None);
         }
 
-        // Parse handedness (>0.5 = right, <0.5 = left).
-        let side = if handedness.first().copied().unwrap_or(0.5) > 0.5 {
+        // Parse handedness (>0.5 = right, <0.5 = left). The raw value
+        // is logged at trace so we can diagnose handedness flips: a
+        // hand near 0.5 is essentially a coin flip, and "the right
+        // hand is recognized worse" usually means the model returns
+        // unstable values for that hand and the tracker keeps switching
+        // slots.
+        let raw_handedness = handedness.first().copied().unwrap_or(0.5);
+        let side = if raw_handedness > 0.5 {
             Some(HandSide::Right)
         } else {
             Some(HandSide::Left)
         };
+        tracing::trace!(
+            raw_handedness,
+            assigned_side = ?side,
+            confidence = conf,
+            uncertain = (raw_handedness - 0.5).abs() < 0.15,
+            "Hand landmark model output"
+        );
 
-        // Convert 63 floats to 21 landmarks, mapping back to full-frame coords.
-        // Use the square-adjusted ROI for remapping (preprocess_roi may have
-        // expanded the shorter dimension to make the crop square in pixel space).
-        let roi_w = square_roi.x_max - square_roi.x_min;
-        let roi_h = square_roi.y_max - square_roi.y_min;
+        // Convert 63 floats to 21 landmarks, inverse-rotating each one
+        // back from the rotation-normalised crop into image space.
         let mut landmarks = [Landmark {
             x: 0.0,
             y: 0.0,
@@ -120,15 +132,17 @@ impl HandLandmarker {
             let Some(&raw_z) = landmarks_raw.get(base + 2) else {
                 break;
             };
-            // Landmarks are relative to the crop (0..224), normalize to 0..1 then map to frame.
-            let lx = raw_x / INPUT_SIZE as f32;
-            let ly = raw_y / INPUT_SIZE as f32;
-            let lz = raw_z / INPUT_SIZE as f32;
+            // Model emits landmarks in pixel-of-crop space (0..INPUT_SIZE).
+            let nx = raw_x / INPUT_SIZE as f32;
+            let ny = raw_y / INPUT_SIZE as f32;
+            let nz = raw_z / INPUT_SIZE as f32;
 
+            let (img_x, img_y, img_z) =
+                roi.landmark_to_image(nx, ny, nz, frame.width, frame.height);
             *lm = Landmark {
-                x: square_roi.x_min + lx * roi_w,
-                y: square_roi.y_min + ly * roi_h,
-                z: lz * roi_w, // Scale Z by ROI width.
+                x: img_x,
+                y: img_y,
+                z: img_z,
             };
         }
 
@@ -177,7 +191,7 @@ impl HandLandmarkBackend {
     pub fn estimate(
         &self,
         frame: &Frame,
-        roi: &[f32; 4],
+        roi: &RotatedRoi,
     ) -> Result<Option<HandDetection>, InferenceError> {
         match self {
             Self::Lite(l) => l.estimate(frame, roi),

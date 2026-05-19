@@ -1,4 +1,4 @@
-# Nailbite
+# n**AI**lbite
 
 BFRB (body-focused repetitive behavior) detection system.
 

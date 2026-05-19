@@ -1,6 +1,6 @@
 # Event data format
 
-This document describes what Nailbite captures to disk for each detection event.
+This document describes what n**AI**lbite captures to disk for each detection event.
 It exists to make the recorded data legible to anyone interested in training a
 proper end-to-end model on it, rather than reverse-engineering the format from
 the source.

@@ -12,7 +12,7 @@ use crate::frame::Frame;
 use crate::detection::types::{FaceDetection, Landmark};
 use crate::errors::InferenceError;
 use crate::inference::postprocessing::sigmoid;
-use crate::inference::preprocessing::{preprocess_roi, NormalizeRange};
+use crate::inference::preprocessing::{preprocess_rotated_nhwc, NormalizeRange, RotatedRoi};
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 192;
@@ -28,21 +28,23 @@ impl FaceMesher {
         Self { session }
     }
 
-    /// Run face mesh estimation on a cropped face ROI.
+    /// Run face mesh estimation on a rotation-normalised face crop.
     ///
-    /// `roi` is [x_min, y_min, x_max, y_max] in normalized coordinates.
-    /// Returns 468 face landmarks mapped to full-frame coordinates.
+    /// The face mesh model is trained on upright, eye-level face crops.
+    /// Feeding it an axis-aligned bbox from face detection makes the
+    /// 468 landmarks — especially the lip/jaw set — jitter on every
+    /// frame-to-frame change in head tilt. Callers compute the rotation
+    /// from BlazeFace's `right-eye → left-eye` keypoints and pass it in
+    /// via `roi`; landmark outputs are inverse-rotated back into image
+    /// coordinates.
     pub fn estimate(
         &self,
         frame: &Frame,
-        roi: &[f32; 4],
+        roi: &RotatedRoi,
     ) -> Result<Option<FaceDetection>, InferenceError> {
-        let (tensor, square_roi) = preprocess_roi(
+        let tensor = preprocess_rotated_nhwc(
             frame,
-            roi[0],
-            roi[1],
-            roi[2],
-            roi[3],
+            roi,
             INPUT_SIZE,
             NormalizeRange::ZeroOne,
         );
@@ -81,11 +83,6 @@ impl FaceMesher {
             return Ok(None);
         }
 
-        // Use the square-adjusted ROI for remapping (preprocess_roi may have
-        // expanded the shorter dimension to make the crop square in pixel space).
-        let roi_w = square_roi.x_max - square_roi.x_min;
-        let roi_h = square_roi.y_max - square_roi.y_min;
-
         let mut landmarks = Vec::with_capacity(NUM_LANDMARKS);
         for i in 0..NUM_LANDMARKS {
             let base = i * 3;
@@ -95,14 +92,12 @@ impl FaceMesher {
 
             let lm = match (raw_x, raw_y, raw_z) {
                 (Some(rx), Some(ry), Some(rz)) => {
-                    let lx = rx / INPUT_SIZE as f32;
-                    let ly = ry / INPUT_SIZE as f32;
-                    let lz = rz / INPUT_SIZE as f32;
-                    Landmark {
-                        x: square_roi.x_min + lx * roi_w,
-                        y: square_roi.y_min + ly * roi_h,
-                        z: lz * roi_w,
-                    }
+                    let nx = rx / INPUT_SIZE as f32;
+                    let ny = ry / INPUT_SIZE as f32;
+                    let nz = rz / INPUT_SIZE as f32;
+                    let (img_x, img_y, img_z) =
+                        roi.landmark_to_image(nx, ny, nz, frame.width, frame.height);
+                    Landmark { x: img_x, y: img_y, z: img_z }
                 }
                 _ => Landmark {
                     x: 0.0,

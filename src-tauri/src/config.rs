@@ -1,4 +1,4 @@
-//! Configuration for the Nailbite Tauri app.
+//! Configuration for the nailbite Tauri app.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -167,14 +167,29 @@ impl Default for CameraConfig {
 /// auto-exposure metering away from the user's face.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CameraControlsConfig {
+    /// Reset gamma to the driver's default at capture start. Other
+    /// apps (browsers, conferencing tools) sometimes leave the
+    /// camera's gamma jacked up; if we don't reset it the image
+    /// arrives over-bright and our own metering can't recover.
+    #[serde(default = "default_true")]
+    pub gamma_reset: bool,
     /// Enable auto-exposure so the camera adapts to room brightness.
     #[serde(default = "default_true")]
     pub auto_exposure: bool,
-    /// Disable frame-rate priority so the camera can use long enough
-    /// exposures to expose the subject in dim rooms. When `false`, the
-    /// driver caps exposure time to maintain FPS and crushes shadows on
-    /// the user's face.
-    #[serde(default)]
+    /// Allow the camera to extend exposure time in dim or backlit
+    /// scenes, even if doing so drops the frame rate (V4L2's "image
+    /// priority" mode).
+    ///
+    /// When `true`, exposure can grow → image stays bright in dim
+    /// rooms, FPS may drop transiently. When `false`, frame rate is
+    /// preserved at the expense of larger gain → exposure is capped,
+    /// the subject ends up dark in dim or backlit scenes and the image
+    /// stops actually responding to changing light (per V4L2 kernel
+    /// docs for `V4L2_CID_EXPOSURE_AUTO_PRIORITY`).
+    ///
+    /// Default `true` — adapting to scene brightness is the whole
+    /// point of having auto-exposure on.
+    #[serde(default = "default_true")]
     pub exposure_auto_priority: bool,
     /// Enable auto white-balance.
     #[serde(default = "default_true")]
@@ -182,38 +197,39 @@ pub struct CameraControlsConfig {
     /// Enable auto gain.
     #[serde(default = "default_true")]
     pub auto_gain: bool,
-    /// Set backlight compensation to the device's maximum value.
-    #[serde(default = "default_true")]
+    /// Pin backlight compensation to the device's maximum value.
+    /// Useful only when the subject is genuinely backlit (bright
+    /// window behind them); off by default because on a normally-lit
+    /// scene the camera ends up boosting shadows that don't exist and
+    /// over-exposes the result.
+    #[serde(default)]
     pub backlight_compensation_max: bool,
     /// Target brightness as a fraction of the control's [min, max] range.
-    /// `None` skips the brightness write and leaves the manufacturer default.
-    #[serde(default = "default_brightness_fraction")]
+    /// `None` (default) skips the brightness write and leaves the
+    /// manufacturer default — almost always the right choice. Override
+    /// only if you've measured an actual brightness problem the camera
+    /// firmware can't compensate for.
+    #[serde(default)]
     pub brightness_fraction: Option<f32>,
     /// Target contrast as a fraction of the control's [min, max] range.
-    /// `None` skips the contrast write.
-    #[serde(default = "default_contrast_fraction")]
+    /// `None` (default) skips the contrast write.
+    #[serde(default)]
     pub contrast_fraction: Option<f32>,
 }
 
 impl Default for CameraControlsConfig {
     fn default() -> Self {
         Self {
+            gamma_reset: true,
             auto_exposure: true,
-            exposure_auto_priority: false,
+            exposure_auto_priority: true,
             auto_white_balance: true,
             auto_gain: true,
-            backlight_compensation_max: true,
-            brightness_fraction: default_brightness_fraction(),
-            contrast_fraction: default_contrast_fraction(),
+            backlight_compensation_max: false,
+            brightness_fraction: None,
+            contrast_fraction: None,
         }
     }
-}
-
-fn default_brightness_fraction() -> Option<f32> {
-    Some(0.60)
-}
-fn default_contrast_fraction() -> Option<f32> {
-    Some(0.55)
 }
 
 /// Individual camera source configuration.

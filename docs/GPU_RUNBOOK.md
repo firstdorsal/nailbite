@@ -78,7 +78,7 @@ groups | grep -E 'render|video'             # both required for /dev/kfd access
 ```bash
 # After the rebuild + reboot:
 bash build.sh GPU_BACKEND=migraphx
-./dist/bundle/appimage/Nailbite_*.AppImage
+./dist/bundle/appimage/nailbite_*.AppImage
 ```
 
 Watch the log for the provider line — you should see:
@@ -93,7 +93,7 @@ If you instead see `"No GPU providers available, falling back to CPU"`, run:
 
 ```bash
 LIBGL_DEBUG=verbose ROCR_VISIBLE_DEVICES=0 \
-    ./dist/bundle/appimage/Nailbite_*.AppImage 2>&1 | head -80
+    ./dist/bundle/appimage/nailbite_*.AppImage 2>&1 | head -80
 ```
 
 The most common failure modes:

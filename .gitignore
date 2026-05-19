@@ -1,5 +1,6 @@
 # Internal plans and notes (not for git)
 .plans/
+.claude/
 
 # Rust
 /target/

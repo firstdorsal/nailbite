@@ -20,6 +20,7 @@ use crate::inference::face_mesh::FaceMesher;
 use crate::inference::hand_landmark::HandLandmarkBackend;
 use crate::inference::palm_detection::PalmDetector;
 use crate::inference::pose_landmark::PoseLandmarker;
+use crate::inference::preprocessing::RotatedRoi;
 use crate::pipeline::smooth_face_landmarks_with_grace;
 use crate::state::AppState;
 use crate::stats::event_history::{BufferedFrame, EventTrigger};
@@ -200,6 +201,86 @@ pub fn get_camera_status(state: State<'_, Arc<AppState>>) -> CameraStatus {
     }
 }
 
+/// Build a rotation-normalised crop from a palm detection.
+///
+/// MediaPipe's palm detector emits 7 keypoints alongside the bbox; the
+/// hand pipeline uses keypoint 0 (wrist) and keypoint 2 (middle-finger
+/// MCP) to compute the hand axis. Aligning the crop's "up" axis with
+/// `wrist → middle MCP` puts the fingers at the top of the crop, which
+/// is the distribution the landmark model was trained on. Without it,
+/// any non-vertical hand collapses model confidence and produces
+/// nonsensical landmark geometry.
+///
+/// `expanded_roi` is the same axis-aligned, 2.6×-expanded bbox the
+/// pipeline used previously; we read its longest side to size the
+/// square crop in pixel space (which is what the rotated sampler
+/// needs). When keypoints are missing — shouldn't happen in practice
+/// but `det.keypoints` is a `Vec` so the type system can't prove it —
+/// we fall back to an unrotated crop centred on the bbox.
+fn build_palm_rotated_roi(
+    det: &crate::inference::postprocessing::Detection,
+    expanded_roi: &[f32; 4],
+    frame_w: u32,
+    frame_h: u32,
+) -> RotatedRoi {
+    let bbox_cx = det.bbox[0];
+    let bbox_cy = det.bbox[1];
+    let roi_w_px = (expanded_roi[2] - expanded_roi[0]) * frame_w as f32;
+    let roi_h_px = (expanded_roi[3] - expanded_roi[1]) * frame_h as f32;
+    let size_px = roi_w_px.max(roi_h_px).max(1.0);
+
+    match (det.keypoints.first(), det.keypoints.get(2)) {
+        (Some(wrist), Some(mid_mcp)) => RotatedRoi::from_axis(
+            bbox_cx,
+            bbox_cy,
+            wrist[0],
+            wrist[1],
+            mid_mcp[0],
+            mid_mcp[1],
+            size_px,
+            frame_w,
+            frame_h,
+        ),
+        _ => RotatedRoi::from_axis_aligned_bbox(expanded_roi, frame_w, frame_h),
+    }
+}
+
+/// Build a rotation-normalised crop from a face detection.
+///
+/// BlazeFace emits 6 keypoints; the canonical face_landmark pipeline uses
+/// keypoint 0 (right eye) and keypoint 1 (left eye) to align the eye line
+/// horizontally in the crop. Without this rotation the model still mostly
+/// works (faces are rarely far from vertical), but the lip / jaw
+/// landmarks — the ones most sensitive to crop alignment — jitter
+/// noticeably on every small head tilt.
+fn build_face_rotated_roi(
+    det: &crate::inference::postprocessing::Detection,
+    expanded_roi: &[f32; 4],
+    frame_w: u32,
+    frame_h: u32,
+) -> RotatedRoi {
+    let bbox_cx = det.bbox[0];
+    let bbox_cy = det.bbox[1];
+    let roi_w_px = (expanded_roi[2] - expanded_roi[0]) * frame_w as f32;
+    let roi_h_px = (expanded_roi[3] - expanded_roi[1]) * frame_h as f32;
+    let size_px = roi_w_px.max(roi_h_px).max(1.0);
+
+    match (det.keypoints.first(), det.keypoints.get(1)) {
+        (Some(right_eye), Some(left_eye)) => RotatedRoi::from_horizontal_axis(
+            bbox_cx,
+            bbox_cy,
+            right_eye[0],
+            right_eye[1],
+            left_eye[0],
+            left_eye[1],
+            size_px,
+            frame_w,
+            frame_h,
+        ),
+        _ => RotatedRoi::from_axis_aligned_bbox(expanded_roi, frame_w, frame_h),
+    }
+}
+
 /// Helper to update tray icon — delegates to the shared tray module so the
 /// global pause/mute commands can update the tray identically. Today's
 /// detection count is passed through to the tooltip text only; the icon
@@ -222,155 +303,26 @@ fn update_tray_icon(state: &AppState, tray_state: TrayState) {
 /// landmarks always match the displayed frame. The interval is set by
 /// `frame_interval` (target preview rate); if inference is too slow the
 /// effective FPS naturally degrades.
-/// Recognizes "user in front of camera" sessions from per-frame face +
-/// pose signals, with asymmetric hysteresis so a brief head-turn doesn't
-/// close a session and a quick re-entry doesn't open one. Two corroborating
-/// signals are required — both the face detector and the pose model can
-/// hallucinate on cluttered furniture in isolation, so we demand the face
-/// be high-confidence AND that the torso pose landmarks (nose + shoulders)
-/// also vote yes.
-struct PresenceTracker {
-    present: bool,
-    /// Consecutive frames observed in the OPPOSITE state — debounce.
-    counter: u32,
-}
-
-/// Minimum face-mesh confidence for the face vote. The mesh's own
-/// internal threshold is permissive (0.5) to keep landmark display
-/// stable; we want a stricter bar for "the user is here".
-/// Face-mesh confidence required to vote "person here". The face mesh
-/// itself only emits a result when its internal confidence is ≥ 0.5,
-/// so this threshold is the *additional* margin the presence gate
-/// demands. Set just above the mesh's own floor: we still want to reject
-/// the rare 0.5–0.55 hallucinations on shirts/posters, but real faces
-/// almost always sit at 0.7+ except during hard occlusions (e.g. hands
-/// over the mouth during a bite) — exactly when we DON'T want to drop
-/// presence.
-const PRESENCE_FACE_CONFIDENCE: f32 = 0.55;
-
-/// Face-confidence floor above which the face alone counts as presence,
-/// no pose corroboration required. This rescues the "user is at the
-/// desk but shoulders cropped" case — pose sees only the head, so a
-/// shoulder-based vote permanently fails and the gate would stick
-/// absent. A high-confidence face is unambiguously a person, not chair
-/// hallucination noise, so we don't need a second signal.
-const PRESENCE_FACE_STRONG_CONFIDENCE: f32 = 0.70;
-
-/// Minimum pose-landmark visibility for an upper-body landmark to count
-/// toward presence.
-const PRESENCE_POSE_VISIBILITY: f32 = 0.5;
-
-/// Minimum number of visible upper-body landmarks (out of nose, eyes,
-/// shoulders) for the pose model to vote "person here". Pulling eyes
-/// into the candidate set means a user sitting close to the desk —
-/// whose shoulders are below the frame — can still get a pose vote
-/// from the head region alone, instead of failing forever.
-const PRESENCE_POSE_MIN_LANDMARKS: usize = 2;
-
-/// Pose landmark indices (BlazePose / MediaPipe convention) used as
-/// upper-body anchors for presence.
-const POSE_NOSE: usize = 0;
-const POSE_LEFT_EYE: usize = 2;
-const POSE_RIGHT_EYE: usize = 5;
-const POSE_LEFT_SHOULDER: usize = 11;
-const POSE_RIGHT_SHOULDER: usize = 12;
-
-/// Sentinel value stored in `AppState::active_notification_id` while a
-/// notification is being built and not yet handed off to notify-rust.
-/// `0` is never a real XDG notification id, so reusing the same field
-/// for both states works without widening the type. The
-/// claim+publish-real-id sequence happens under `Mutex`, so the
-/// sentinel is observable only between the spawn-thread call and
-/// `notif.show()`'s return — exactly the window that used to race.
+/// Sentinel reserved value that is never a real XDG notification id;
+/// `close_active_notification` skips it if it ever lands in the slot
+/// (defence-in-depth — current code paths don't store this value).
 const NOTIFICATION_CLAIM_SENTINEL: u32 = 0;
 
-fn face_votes_present(face: &Option<FaceDetection>) -> bool {
-    face.as_ref()
-        .is_some_and(|f| f.confidence >= PRESENCE_FACE_CONFIDENCE)
-}
-
-fn face_votes_present_strong(face: &Option<FaceDetection>) -> bool {
-    face.as_ref()
-        .is_some_and(|f| f.confidence >= PRESENCE_FACE_STRONG_CONFIDENCE)
-}
-
-fn pose_votes_present(pose: &Option<crate::detection::types::PoseDetection>) -> bool {
-    let Some(p) = pose else { return false; };
-    let visible = [
-        POSE_NOSE,
-        POSE_LEFT_EYE,
-        POSE_RIGHT_EYE,
-        POSE_LEFT_SHOULDER,
-        POSE_RIGHT_SHOULDER,
-    ]
-    .iter()
-    .filter(|&&i| {
-        p.landmarks
-            .get(i)
-            .is_some_and(|lm| lm.visibility >= PRESENCE_POSE_VISIBILITY)
-    })
-    .count();
-    visible >= PRESENCE_POSE_MIN_LANDMARKS
-}
-
-impl PresenceTracker {
-    fn new() -> Self {
-        // Start absent so the first arrival logs a session_start instead
-        // of being silently assumed.
-        Self { present: false, counter: 0 }
-    }
-
-    /// True when presence is currently `true` but the per-frame vote
-    /// has flipped to "no person" for at least one frame — i.e. we're
-    /// mid-departure and the 6 s absent debounce hasn't expired yet.
-    ///
-    /// Used to gate detections off during that window: when the user is
-    /// walking out of frame, the face/pose models briefly hallucinate
-    /// on whatever they leave behind (chair, jacket, lamp) and we'd
-    /// fire spurious BFRB events on static objects. Detection
-    /// **disables** as soon as a single absent vote lands; presence
-    /// itself only drops after the full debounce.
-    fn is_transitioning_to_absent(&self) -> bool {
-        self.present && self.counter > 0
-    }
-
-    /// Update with a fresh per-frame observation. Returns:
-    /// - `Some(true)` on absent → present transition
-    /// - `Some(false)` on present → absent transition
-    /// - `None` otherwise
-    fn update(&mut self, person_visible: bool) -> Option<bool> {
-        // ≈ 1.0 s at 8 fps to accept presence (gives the face mesh and
-        // pose model time to agree on a real user, rather than a frame
-        // of correlated noise); ≈ 6 s to confirm absence so brief
-        // occlusions (hands over face during a bite, glance away,
-        // bending out of frame to reach a drink) don't end the session.
-        // The cost of a slow absent transition is just a few extra
-        // seconds of `Ready` tray colour — far less annoying than the
-        // gate snapping off during legitimate use.
-        const PRESENT_FRAMES: u32 = 8;
-        const ABSENT_FRAMES: u32 = 48;
-
-        if person_visible == self.present {
-            self.counter = 0;
-            return None;
-        }
-        self.counter += 1;
-        let threshold = if person_visible { PRESENT_FRAMES } else { ABSENT_FRAMES };
-        if self.counter < threshold {
-            return None;
-        }
-        self.present = person_visible;
-        self.counter = 0;
-        Some(person_visible)
-    }
-}
+// Face/pose-vote-based presence tracking was removed: it kept
+// declaring real users "Away" under non-ideal lighting (face conf in
+// the 0.5–0.55 band, BlazePose visibility around 0.4) and the
+// resulting gate suppressed legitimate detections. The
+// `TrayState::Absent` variant and the `presence-changed` IPC channel
+// are intentionally kept around for a future explicit absence trigger
+// (manual toggle, idle timeout, etc.). When that lands it should
+// emit `presence-changed` and call `apply_tray_state(.., Absent, ..)`
+// at the transition; the rest of the wiring is already in place.
 
 fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
     info!("Detection loop started");
     let start_time = Instant::now();
     let mut last_frame_time = Instant::now();
     let mut frame_counter: u64 = 0;
-    let mut presence = PresenceTracker::new();
 
     // Set tray to green (ready) when detection loop starts
     update_tray_icon(&state, TrayState::Ready);
@@ -505,22 +457,27 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
 
             // Face pipeline
             if let Ok(face_result) = face_detector.detect(frame) {
-                if let Some(roi) = face_result.face_rois.first() {
-                    if let Ok(mesh) = face_mesher.estimate(frame, roi) {
+                if let (Some(roi), Some(det)) = (
+                    face_result.face_rois.first(),
+                    face_result.detections.first(),
+                ) {
+                    // Rotation-normalised face crop: align the right-eye
+                    // → left-eye keypoints horizontally so the face
+                    // mesh model sees an upright crop. Without it,
+                    // every small head tilt shifts the axis-aligned bbox
+                    // and mouth / jaw landmarks jitter wildly between
+                    // frames.
+                    let rotated = build_face_rotated_roi(
+                        det,
+                        roi,
+                        frame.width,
+                        frame.height,
+                    );
+                    if let Ok(mesh) = face_mesher.estimate(frame, &rotated) {
                         face = mesh;
                     }
                 }
             }
-
-            // Snapshot the RAW face (pre-smoothing) for the presence vote.
-            // The grace-period smoothing keeps a stale face alive for ~4
-            // frames after the model returns None, which is exactly what
-            // we *don't* want when deciding whether the user is in frame
-            // — a single hallucinated face would stick around long enough
-            // to keep presence "true" through the next absent debounce.
-            // Smoothing still applies to `face` itself so the landmark
-            // overlay stays stable.
-            let raw_face = face.clone();
 
             // Smooth face landmarks (per-camera smoothing state with grace period)
             // Grace period of 4 frames (~500ms at 8 FPS) prevents flickering
@@ -582,7 +539,19 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                             cy = det.bbox[1],
                             "Palm ROI"
                         );
-                        match hand_landmarker.estimate(frame, roi) {
+                        // Rotation-normalised crop: orient along
+                        // wrist (keypoint 0) → middle-finger MCP
+                        // (keypoint 2). The MediaPipe hand_landmark model
+                        // is trained on crops where fingers point up;
+                        // feeding it the raw axis-aligned bbox tanks
+                        // accuracy on any non-vertical hand.
+                        let rotated = build_palm_rotated_roi(
+                            det,
+                            roi,
+                            frame.width,
+                            frame.height,
+                        );
+                        match hand_landmarker.estimate(frame, &rotated) {
                             Ok(Some(hand)) => {
                                 debug!(
                                     idx = i,
@@ -767,13 +736,6 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                             (wrist_lm.landmark.x, wrist_lm.landmark.y, 0.35_f32)
                         };
 
-                        let roi = [
-                            (roi_cx - roi_size / 2.0).max(0.0),
-                            (roi_cy - roi_size / 2.0).max(0.0),
-                            (roi_cx + roi_size / 2.0).min(1.0),
-                            (roi_cy + roi_size / 2.0).min(1.0),
-                        ];
-
                         debug!(
                             wrist = ?side,
                             visibility = wrist_lm.visibility,
@@ -782,7 +744,40 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                             "Trying pose wrist detection"
                         );
 
-                        if let Ok(Some(mut hand)) = hand_landmarker.estimate(frame, &roi) {
+                        // Rotation along the elbow→wrist axis: the hand
+                        // is downstream of the wrist along that vector,
+                        // so aligning the crop's "up" axis to it puts
+                        // the fingers at the top — matching what the
+                        // landmark model expects. When the elbow is not
+                        // visible we fall back to a wrist-centred,
+                        // unrotated crop (worse but better than no
+                        // detection).
+                        let rotated = if forearm_visible {
+                            #[allow(clippy::expect_used)]
+                            let elbow = elbow_lm.expect("checked above");
+                            let size_px = roi_size * frame.width as f32;
+                            RotatedRoi::from_axis(
+                                roi_cx, roi_cy,
+                                elbow.landmark.x, elbow.landmark.y,
+                                wrist_lm.landmark.x, wrist_lm.landmark.y,
+                                size_px,
+                                frame.width, frame.height,
+                            )
+                        } else {
+                            let bbox = [
+                                (roi_cx - roi_size / 2.0).max(0.0),
+                                (roi_cy - roi_size / 2.0).max(0.0),
+                                (roi_cx + roi_size / 2.0).min(1.0),
+                                (roi_cy + roi_size / 2.0).min(1.0),
+                            ];
+                            RotatedRoi::from_axis_aligned_bbox(
+                                &bbox,
+                                frame.width,
+                                frame.height,
+                            )
+                        };
+
+                        if let Ok(Some(mut hand)) = hand_landmarker.estimate(frame, &rotated) {
                             hand.side = Some(side);
                             debug!(
                                 wrist = ?side,
@@ -946,67 +941,10 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                         .push((detector.bfrb_type(), confidence, explanation));
                 }
 
-                // Per-loop presence vote. The standard path requires BOTH
-                // the face mesh AND the pose model to agree — either
-                // alone hallucinates on furniture and clothing. But a
-                // strongly-confident face by itself (≥0.70) is enough
-                // because that floor sits comfortably above the
-                // hallucination band; this rescues the "user sits close
-                // to the desk with shoulders cropped" case where pose
-                // can't see any torso landmarks and the AND-gate would
-                // otherwise stick at absent forever.
-                let person_visible = face_votes_present_strong(&raw_face)
-                    || (face_votes_present(&raw_face) && pose_votes_present(&pose));
-                match presence.update(person_visible) {
-                    Some(true) => {
-                        info!(camera = %camera_id, "User present — session start");
-                        state.session_log.log_session_start();
-                        // Switch tray + UI back to "Monitoring" unless an
-                        // alert is currently active.
-                        if !state.alert_active.load(Ordering::Relaxed)
-                            && !state.paused.load(Ordering::Relaxed)
-                        {
-                            update_tray_icon(&state, TrayState::Ready);
-                        }
-                        let _ = state.app_handle.emit(
-                            "presence-changed",
-                            serde_json::json!({ "present": true }),
-                        );
-                    }
-                    Some(false) => {
-                        info!(camera = %camera_id, "User absent — session end");
-                        state.session_log.log_session_end();
-                        // Drop pre-trigger frames so the NEXT detection
-                        // doesn't pull in empty-chair frames from the
-                        // away period.
-                        state.event_history.lock().clear_ring_buffer();
-                        // Drop any partial tracker state so a phantom
-                        // detection mid-departure can't bleed into the
-                        // next session.
-                        state.tracker.write().reset_all();
-                        // Flip tray + UI to the muted dark-gray "absent"
-                        // state so the user can tell at a glance that
-                        // detection is gated off. Skip while an alert is
-                        // still active or paused — those states own the
-                        // icon.
-                        if !state.alert_active.load(Ordering::Relaxed)
-                            && !state.paused.load(Ordering::Relaxed)
-                        {
-                            update_tray_icon(&state, TrayState::Absent);
-                        }
-                        let _ = state.app_handle.emit(
-                            "presence-changed",
-                            serde_json::json!({ "present": false }),
-                        );
-                    }
-                    None => {}
-                }
-
                 // Push this frame into the event history ring buffer with the
                 // explanations we just produced. Done after detection so the
                 // saved trigger frame is the one whose signals fired the alert.
-                // Skip while absent — there is nothing meaningful to record.
-                if presence.present {
+                {
                     let mut history = state.event_history.lock();
                     if history.is_enabled() {
                         history.push_frame(BufferedFrame {
@@ -1020,35 +958,23 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                     }
                 }
 
-                // Update tracker — but only when the user is present.
-                // Skipping the tracker while absent guarantees we never
-                // fire an alert, send a notification, or start a capture
-                // when there is no one in front of the camera; phantom
-                // hand/face detections on background objects can't escalate.
+                // Update tracker on every frame. Presence-based gating
+                // used to suppress this while the face/pose vote was
+                // "Away," but that vote was unreliable enough to drop
+                // legitimate detections; with it removed, tracker runs
+                // unconditionally and the only gates are the user
+                // controls (pause).
                 let events;
                 let was_alerting;
                 let is_alerting;
                 {
                     let mut tracker = state.tracker.write();
                     was_alerting = tracker.any_alerting();
-                    // Suppress tracker updates not only when presence is
-                    // confirmed absent but ALSO while we're transitioning
-                    // toward absent. The window between the user's last
-                    // good frame and the 6 s absent debounce expiring is
-                    // exactly when the face/pose models hallucinate on
-                    // the now-empty chair, jacket, lamp etc; firing
-                    // events from that window means alerts on furniture.
-                    events = if presence.present
-                        && !presence.is_transitioning_to_absent()
-                    {
-                        tracker.update_with_explanations(
-                            &detection_results_tuples,
-                            timestamp,
-                            &camera_id,
-                        )
-                    } else {
-                        Vec::new()
-                    };
+                    events = tracker.update_with_explanations(
+                        &detection_results_tuples,
+                        timestamp,
+                        &camera_id,
+                    );
                     is_alerting = tracker.any_alerting();
                 }
 
@@ -1177,16 +1103,39 @@ fn run_detection_loop(state: Arc<AppState>, frame_interval: Duration) {
                     // "claim made, real id pending" so other threads
                     // see the slot as occupied even before notify-rust
                     // returns the daemon's handle.
-                    let claimed = if notif_cfg.enabled {
-                        let mut guard = state.active_notification_id.lock();
-                        if guard.is_some() {
+                    // Time-based dedup: if we fired a toast within the
+                    // last 2 s, skip this one so we don't stack
+                    // duplicates from consecutive frames. Independent
+                    // of `active_notification_id` (id-based dedup got
+                    // permanently stuck on daemons where wait_for_action
+                    // hangs, leaving the slot at a phantom id forever).
+                    const NOTIFICATION_DEDUP_WINDOW: Duration = Duration::from_secs(2);
+                    let claimed = if !notif_cfg.enabled {
+                        info!(
+                            bfrb = %event.bfrb_type,
+                            "Notification skipped: notifications disabled in config"
+                        );
+                        false
+                    } else {
+                        let mut guard = state.last_notification_at.lock();
+                        let now = Instant::now();
+                        let recent = guard
+                            .map(|t| now.duration_since(t) < NOTIFICATION_DEDUP_WINDOW)
+                            .unwrap_or(false);
+                        if recent {
+                            info!(
+                                bfrb = %event.bfrb_type,
+                                "Notification skipped: another toast fired within the dedup window"
+                            );
                             false
                         } else {
-                            *guard = Some(NOTIFICATION_CLAIM_SENTINEL);
+                            *guard = Some(now);
+                            info!(
+                                bfrb = %event.bfrb_type,
+                                "Notification spawn approved"
+                            );
                             true
                         }
-                    } else {
-                        false
                     };
                     if claimed {
                         let image_path = build_alert_image(
@@ -1678,7 +1627,7 @@ fn spawn_alert_notification(
     notif
         .summary(&title)
         .body(body)
-        .appname("Nailbite")
+        .appname("nailbite")
         .icon("dialog-warning")
         .action("verdict-tp", "Correct")
         .action("verdict-fp", "False positive")
@@ -1690,6 +1639,12 @@ fn spawn_alert_notification(
         }
     }
 
+    info!(
+        %bfrb,
+        image = image_path.as_ref().and_then(|p| p.to_str()).unwrap_or("<none>"),
+        timeout_ms,
+        "Submitting desktop notification to daemon"
+    );
     let res = notif.show();
 
     let handle = match res {
@@ -1703,6 +1658,11 @@ fn spawn_alert_notification(
             return;
         }
     };
+    info!(
+        %bfrb,
+        notification_id = handle.id(),
+        "Desktop notification accepted by daemon"
+    );
 
     // Publish the real XDG id, overwriting the claim sentinel. The
     // in-app AlertModal's verdict / dismiss buttons read this slot
@@ -1762,6 +1722,12 @@ fn spawn_alert_notification(
             serde_json::json!({ "bfrb_type": "notification_action" }),
         );
     });
+    // If we reach this line the daemon closed the notification (either
+    // by user action or by timeout) and wait_for_action returned. If
+    // we DON'T see this log for a fired notification, the thread is
+    // stuck blocked on the daemon's signal — which would also keep
+    // `active_notification_id` populated and block every future event.
+    info!(%bfrb, "Notification thread complete (daemon closed or actioned)");
 }
 
 /// Close any desktop notification we previously fired for the active
@@ -1802,191 +1768,3 @@ fn elapsed_ms(start: &Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
-#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-mod tests {
-    //! Tests for the presence-detection helpers and `PresenceTracker`
-    //! hysteresis. The detection loop itself isn't exercised here — it
-    //! needs a live camera + ONNX sessions — but the gating logic that
-    //! decides whether the user is in frame is pure and worth covering.
-
-    use super::{
-        face_votes_present, pose_votes_present, PresenceTracker, POSE_LEFT_SHOULDER, POSE_NOSE,
-        POSE_RIGHT_SHOULDER, PRESENCE_FACE_CONFIDENCE, PRESENCE_POSE_VISIBILITY,
-    };
-    use crate::detection::types::{FaceDetection, Landmark, PoseDetection, PoseLandmark};
-
-    fn dummy_landmark() -> Landmark {
-        Landmark { x: 0.5, y: 0.5, z: 0.0 }
-    }
-
-    fn face_with_confidence(conf: f32) -> FaceDetection {
-        FaceDetection {
-            landmarks: Vec::new(),
-            confidence: conf,
-        }
-    }
-
-    /// Build a 33-landmark pose with given visibilities at specific
-    /// indices; everything else is invisible. Anything not in `set`
-    /// gets `visibility = 0.0`.
-    fn pose_with(set: &[(usize, f32)]) -> PoseDetection {
-        let mut lm = vec![
-            PoseLandmark {
-                landmark: dummy_landmark(),
-                visibility: 0.0,
-                presence: 1.0,
-            };
-            33
-        ];
-        for &(i, v) in set {
-            lm[i].visibility = v;
-        }
-        PoseDetection {
-            landmarks: lm,
-            confidence: 0.9,
-        }
-    }
-
-    // --- face_votes_present ---
-
-    #[test]
-    fn face_vote_rejects_none() {
-        assert!(!face_votes_present(&None));
-    }
-
-    #[test]
-    fn face_vote_rejects_below_threshold() {
-        let f = Some(face_with_confidence(PRESENCE_FACE_CONFIDENCE - 0.01));
-        assert!(!face_votes_present(&f));
-    }
-
-    #[test]
-    fn face_vote_accepts_at_threshold() {
-        let f = Some(face_with_confidence(PRESENCE_FACE_CONFIDENCE));
-        assert!(face_votes_present(&f));
-    }
-
-    #[test]
-    fn face_vote_accepts_high_confidence() {
-        let f = Some(face_with_confidence(0.99));
-        assert!(face_votes_present(&f));
-    }
-
-    // --- pose_votes_present ---
-
-    #[test]
-    fn pose_vote_rejects_none() {
-        assert!(!pose_votes_present(&None));
-    }
-
-    #[test]
-    fn pose_vote_rejects_partial_visibility() {
-        // Only one of three torso landmarks visible; we require at least
-        // two — a single floating nose isn't enough.
-        let p = Some(pose_with(&[(POSE_NOSE, PRESENCE_POSE_VISIBILITY)]));
-        assert!(!pose_votes_present(&p));
-    }
-
-    #[test]
-    fn pose_vote_accepts_two_of_three_landmarks() {
-        // Two of three visible is enough — a real user leaning back or
-        // with one shoulder cropped should still pass.
-        let p = Some(pose_with(&[
-            (POSE_NOSE, 0.9),
-            (POSE_LEFT_SHOULDER, 0.9),
-        ]));
-        assert!(pose_votes_present(&p));
-    }
-
-    #[test]
-    fn pose_vote_accepts_all_three_above_threshold() {
-        let p = Some(pose_with(&[
-            (POSE_NOSE, 0.9),
-            (POSE_LEFT_SHOULDER, 0.9),
-            (POSE_RIGHT_SHOULDER, 0.9),
-        ]));
-        assert!(pose_votes_present(&p));
-    }
-
-    #[test]
-    fn pose_vote_rejects_low_visibility_landmarks() {
-        // All three "present" but below the visibility floor — the
-        // landmark is there but the model thinks it's occluded or
-        // hallucinated.
-        let below = PRESENCE_POSE_VISIBILITY - 0.05;
-        let p = Some(pose_with(&[
-            (POSE_NOSE, below),
-            (POSE_LEFT_SHOULDER, below),
-            (POSE_RIGHT_SHOULDER, below),
-        ]));
-        assert!(!pose_votes_present(&p));
-    }
-
-    // --- PresenceTracker hysteresis ---
-
-    #[test]
-    fn tracker_starts_absent() {
-        let mut t = PresenceTracker::new();
-        // First true observation doesn't immediately flip — must clear
-        // the present-debounce.
-        assert!(t.update(true).is_none());
-    }
-
-    #[test]
-    fn tracker_promotes_after_present_debounce() {
-        let mut t = PresenceTracker::new();
-        // PRESENT_FRAMES = 8 in source. Feed 7 true → still None, then
-        // 8th true → Some(true).
-        for _ in 0..7 {
-            assert!(t.update(true).is_none());
-        }
-        assert_eq!(t.update(true), Some(true));
-    }
-
-    #[test]
-    fn tracker_demotes_after_absent_debounce() {
-        let mut t = PresenceTracker::new();
-        // Get into the present state first.
-        for _ in 0..8 {
-            t.update(true);
-        }
-        // ABSENT_FRAMES = 48. Feed 47 false → still None, 48th → Some(false).
-        for _ in 0..47 {
-            assert!(t.update(false).is_none());
-        }
-        assert_eq!(t.update(false), Some(false));
-    }
-
-    #[test]
-    fn tracker_ignores_brief_flicker_to_present() {
-        // A single hallucinated face frame inside an absent run shouldn't
-        // start a session — that's the whole point of the present-debounce.
-        let mut t = PresenceTracker::new();
-        for _ in 0..3 {
-            assert!(t.update(true).is_none());
-        }
-        // Flicker back to absent; counter resets.
-        assert!(t.update(false).is_none());
-        // Now ramp up properly: takes another full PRESENT_FRAMES.
-        for _ in 0..7 {
-            assert!(t.update(true).is_none());
-        }
-        assert_eq!(t.update(true), Some(true));
-    }
-
-    #[test]
-    fn tracker_ignores_brief_glance_away() {
-        // User looks sideways for a few frames; the session shouldn't end.
-        let mut t = PresenceTracker::new();
-        for _ in 0..8 {
-            t.update(true);
-        }
-        // 5 false frames — fewer than ABSENT_FRAMES (48). Stays present.
-        for _ in 0..5 {
-            assert!(t.update(false).is_none());
-        }
-        // One true frame resets the counter; remains present.
-        assert!(t.update(true).is_none());
-    }
-}

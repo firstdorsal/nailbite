@@ -1,4 +1,4 @@
-//! Nailbite Tauri application library.
+//! nailbite Tauri application library.
 
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ pub fn run() {
         .with(filter)
         .init();
 
-    info!("Starting Nailbite Tauri application");
+    info!("Starting nailbite Tauri application");
 
     // Defense-in-depth: disable WebKitGTK DMA-BUF renderer and compositing mode.
     // The primary fix is pinning WebKitGTK to 2.44.0-2 at build time (before the
@@ -188,7 +188,7 @@ pub fn run() {
             let initial_icon = generate_tray_icon(TrayState::NotReady);
             let _tray = TrayIconBuilder::with_id("nailbite-tray")
                 .icon(initial_icon)
-                .tooltip("Nailbite - BFRB Detection (Camera not started)")
+                .tooltip("nailbite - BFRB Detection (Camera not started)")
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
@@ -280,7 +280,7 @@ pub fn run() {
                 }
             }
 
-            info!("Nailbite Tauri setup complete");
+            info!("nailbite Tauri setup complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

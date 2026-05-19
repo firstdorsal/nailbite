@@ -1,5 +1,5 @@
 #!/bin/bash
-# Nailbite Tauri Build Script
+# nailbite Tauri Build Script
 #
 # Builds the Tauri desktop application using Docker for reproducible builds.
 # Produces AppImage and deb packages.
@@ -163,7 +163,7 @@ if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
         # Rename bundle files
         if [ -d "${OUTPUT_DIR}/bundle" ]; then
             # Find and rename AppImage files (only original Tauri-generated names)
-            find "${OUTPUT_DIR}/bundle" -name "Nailbite_*.AppImage" -type f | while read -r file; do
+            find "${OUTPUT_DIR}/bundle" -name "nailbite_*.AppImage" -type f | while read -r file; do
                 dir=$(dirname "$file")
                 # New name: nailbite_<version>_amd64-<gpu>.AppImage
                 new_name="${dir}/nailbite_${VERSION}_amd64-${GPU_SUFFIX}.AppImage"
@@ -171,7 +171,7 @@ if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
             done
 
             # Find and rename deb files (only original Tauri-generated names)
-            find "${OUTPUT_DIR}/bundle" -name "Nailbite_*.deb" -type f | while read -r file; do
+            find "${OUTPUT_DIR}/bundle" -name "nailbite_*.deb" -type f | while read -r file; do
                 dir=$(dirname "$file")
                 # New name: nailbite_<version>_amd64-<gpu>.deb
                 new_name="${dir}/nailbite_${VERSION}_amd64-${GPU_SUFFIX}.deb"
@@ -179,7 +179,7 @@ if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
             done
 
             # Find and rename rpm files (only original Tauri-generated names)
-            find "${OUTPUT_DIR}/bundle" -name "Nailbite-*.rpm" -type f | while read -r file; do
+            find "${OUTPUT_DIR}/bundle" -name "nailbite-*.rpm" -type f | while read -r file; do
                 dir=$(dirname "$file")
                 # New name: nailbite_<version>_amd64-<gpu>.rpm
                 new_name="${dir}/nailbite_${VERSION}_amd64-${GPU_SUFFIX}.rpm"

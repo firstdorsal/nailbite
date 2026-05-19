@@ -13,10 +13,19 @@ models:
     # remains the automatic fallback. Runs on CPU, CUDA, ROCm, MIGraphX.
     hand_landmark_full: ./models/hand_landmark_full.onnx
     # Quality preference for hand landmarking:
-    #   auto - use the full model if available, lite otherwise (default)
-    #   lite - always use MediaPipe lite (skips downloading the full model)
+    #   auto - use the full model if available, lite otherwise
+    #   lite - always use MediaPipe lite (default; emits handedness)
     #   full - require the full model (errors out if unavailable)
-    hand_landmark_quality: auto
+    #
+    # Lite is the default because the RTMPose-m full model is more
+    # precise per-keypoint but doesn't emit handedness, which leaves
+    # the tracker dependent on pose-wrist matching to decide left/right
+    # — and pose visibility is unstable enough in real-world lighting
+    # that hand identity flickers. The lite model bakes handedness
+    # into its output, which is the more important signal for BFRB
+    # tracking. Switch to `full` if you have a clean desk shot with
+    # both wrists clearly visible and want sub-pixel landmark accuracy.
+    hand_landmark_quality: lite
     face_detection: ./models/face_detection.onnx
     face_mesh: ./models/face_mesh.onnx
     pose_landmark: ./models/pose_landmark.onnx
@@ -29,29 +38,37 @@ camera:
     # inference. Higher = smoother preview, more bandwidth between Rust and the
     # webview. Must be >= inference_fps.
     preview_fps: 24
-    # Subject-friendly camera biasing applied at capture start. Each
-    # field maps to a V4L2 control and is best-effort: unsupported
-    # controls on a given camera are skipped, not fatal. Defaults
-    # were chosen so the user's face stays well-lit regardless of
-    # background lighting (e.g. a bright window behind the user).
+    # Camera biasing applied at capture start. Each field maps to a
+    # V4L2 control and is best-effort: unsupported controls on a
+    # given camera are skipped, not fatal. Defaults are tuned to be
+    # MINIMAL — just enable the camera's own auto-features and reset
+    # gamma to driver default. The "lift biases" (max backlight
+    # compensation, brightness/contrast pushes) are opt-in because on
+    # normally-lit scenes they over-expose the image.
     controls:
+        # Reset gamma to driver default. Other apps (browsers,
+        # conferencing tools) often leave gamma jacked up; without
+        # this the image arrives over-bright and auto-exposure can't
+        # recover. Leave on unless you have a specific reason.
+        gamma_reset: true
         # Auto-exposure ON so the camera tracks room brightness.
         auto_exposure: true
-        # Frame-rate priority OFF — when this is true, the driver caps
-        # exposure time to keep FPS up and the subject ends up dark
-        # in dim rooms. Setting to false lets exposure stretch.
-        exposure_auto_priority: false
+        # Image priority ON — exposure may extend in dim or backlit
+        # scenes (FPS may drop briefly). When false, V4L2 caps
+        # exposure to preserve FPS and the subject ends up dark.
+        exposure_auto_priority: true
         auto_white_balance: true
         auto_gain: true
-        # Backlight compensation slammed to MAX so a bright window
-        # behind the user can't pull metering off their face.
-        backlight_compensation_max: true
-        # Brightness/contrast as a fraction of the control's [min,max]
-        # range, rounded to the nearest supported step. Set to null
-        # (or omit) to leave the camera's default. Both are clamped
-        # into [0.0, 1.0].
-        brightness_fraction: 0.60
-        contrast_fraction: 0.55
+        # Opt-in lift for genuinely backlit scenes (bright window
+        # behind the subject). Off by default because it over-exposes
+        # on normally-lit scenes.
+        backlight_compensation_max: false
+        # Manual brightness / contrast bias as a fraction of the
+        # control's [min, max] range, rounded to the nearest step.
+        # null (default) leaves the camera's own default — the right
+        # choice unless you've measured a specific problem.
+        brightness_fraction: null
+        contrast_fraction: null
     sources:
         - id: main
           device: /dev/video0
@@ -95,22 +112,22 @@ detection:
         nail_biting:
             enabled: true
             proximity_threshold: 0.35
-            # 4 s of sustained mouth-contact is required so that brief
-            # incidental gestures (head-scratching, brushing the lip,
-            # adjusting glasses) don't trip the detector. Real nail biting
-            # is a deliberate, dwelling behavior that easily clears this.
-            min_sustained_ms: 4000
+            # 1 s of sustained mouth-contact. Anything longer kept
+            # blowing past real bites (which are often a brief
+            # chew-and-retract). The temporal tracker's positive_ratio
+            # (config below) still filters single-frame flickers, and
+            # the per-detector suppressions (typing posture, gripping
+            # an object, chin rest) handle the obvious false positives.
+            min_sustained_ms: 1000
             confidence_threshold: 0.3
         nail_picking:
             enabled: true
-            # Hands at the keyboard sit close together but aren't actually
-            # picking; tightened proximity + min-sustained + confidence to
-            # distinguish a real picking gesture (hands stationary and
-            # close for a longer beat) from incidental typing posture.
-            # 4 s minimum so passing hand contact (handing something off,
-            # cracking knuckles, brushing fingers) never alerts.
+            # Picking sits at the same dwell budget as biting; both
+            # are deliberate gestures and 1 s is enough to distinguish
+            # them from passing hand contact while still catching real
+            # episodes.
             proximity_threshold: 0.18
-            min_sustained_ms: 4000
+            min_sustained_ms: 1000
             confidence_threshold: 0.5
         hair_pulling:
             enabled: false
@@ -132,9 +149,12 @@ detection:
         # Consecutive detection frames required before a new hand becomes visible
         confirmation_frames: 2
         # EMA smoothing factor for landmarks (1=use new sample as-is, 0=never update).
-        # Higher = less lag, slightly noisier; raised from 0.3 to reduce visible
-        # tracking lag at 8 FPS inference.
-        smoothing_alpha: 0.6
+        # With the rotation-normalised crop in place the model's per-frame
+        # output is genuinely stable, so we keep this responsive (closer
+        # to 1.0 = less lag). Push down toward 0.5 if landmarks visibly
+        # jitter — but usually that means the crop is wrong, not the
+        # smoother.
+        smoothing_alpha: 0.7
         # Confidence threshold for accepting a new hand (higher = fewer false positives)
         new_hand_confidence: 0.30
         # Confidence threshold for keeping an existing hand (lower = more stable)

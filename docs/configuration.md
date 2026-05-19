@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Nailbite is configured via `config.yaml` in the project root.
+n**AI**lbite is configured via `config.yaml` in the project root.
 
 ## Complete Configuration
 
@@ -22,14 +22,15 @@ models:
 camera:
   inference_fps: 8             # Frames per second for inference
   preview_fps: 24              # Live preview FPS (must be >= inference_fps)
-  controls:                    # Subject-friendly biases applied at capture start
+  controls:                    # Camera biasing applied at capture start
+    gamma_reset: true
     auto_exposure: true
-    exposure_auto_priority: false   # Let exposure stretch in dim rooms
+    exposure_auto_priority: true    # Image priority — exposure may stretch in dim light
     auto_white_balance: true
     auto_gain: true
-    backlight_compensation_max: true
-    brightness_fraction: 0.60       # Fraction of [min,max], or null for camera default
-    contrast_fraction: 0.55
+    backlight_compensation_max: false   # Opt-in for backlit scenes only
+    brightness_fraction: null           # Fraction of [min,max], or null (default) for camera default
+    contrast_fraction: null
   sources:
     - id: main
       device: /dev/video0
@@ -132,18 +133,20 @@ training:
 #### camera.controls
 
 Applied best-effort: unsupported V4L2 controls on a given camera are skipped, not fatal.
-Defaults are tuned so the user's face stays well-lit regardless of background lighting
-(e.g. a bright window behind the user).
+Defaults are minimal — just enable the camera's own auto-features and reset gamma to
+the driver default. The lift biases (max backlight compensation, brightness/contrast
+pushes) are opt-in because on normally-lit scenes they over-expose the image.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| gamma_reset | bool | true | Write gamma back to driver default at startup. Other apps (browsers, conferencing tools) often leave gamma cranked up; auto-exposure can't recover from that. |
 | auto_exposure | bool | true | Let the driver track room brightness |
-| exposure_auto_priority | bool | false | When `true`, driver caps exposure to keep FPS up; setting `false` lets exposure stretch in dim rooms |
+| exposure_auto_priority | bool | true | V4L2 image-priority mode: when `true`, exposure may stretch in dim or backlit scenes (FPS may drop briefly); when `false`, exposure is capped to preserve FPS and the subject crushes to black in dim light |
 | auto_white_balance | bool | true | Track ambient colour temperature |
 | auto_gain | bool | true | Track ambient gain |
-| backlight_compensation_max | bool | true | Pin backlight compensation to MAX so a bright window can't pull metering off your face |
-| brightness_fraction | float or null | 0.60 | Position within the control's `[min,max]` range, rounded to its step. `null` keeps the camera's own default. |
-| contrast_fraction | float or null | 0.55 | Same semantics as `brightness_fraction` |
+| backlight_compensation_max | bool | false | Opt-in: pin backlight compensation to MAX. Only useful when the subject is genuinely backlit (bright window behind them); on a normally-lit scene this over-exposes. |
+| brightness_fraction | float or null | null | Manual override. Position within the control's `[min,max]` range, rounded to its step. `null` keeps the camera's own default — usually the right choice. |
+| contrast_fraction | float or null | null | Same semantics as `brightness_fraction` |
 
 #### camera.sources
 

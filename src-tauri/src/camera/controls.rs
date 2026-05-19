@@ -41,6 +41,7 @@ pub enum ControlOutcome {
 /// telemetry and for the eventual "Controls applied" UI surface.
 #[derive(Debug, Clone, Default)]
 pub struct ControlsReport {
+    pub gamma_reset: Option<ControlOutcome>,
     pub auto_exposure: Option<ControlOutcome>,
     pub exposure_auto_priority: Option<ControlOutcome>,
     pub auto_white_balance: Option<ControlOutcome>,
@@ -119,6 +120,8 @@ pub(crate) const V4L2_CID_AUTOGAIN: u32 = 0x0098_0912;
 #[cfg(target_os = "linux")]
 pub(crate) const V4L2_CID_BACKLIGHT_COMPENSATION: u32 = 0x0098_091C;
 #[cfg(target_os = "linux")]
+pub(crate) const V4L2_CID_GAMMA: u32 = 0x0098_0910;
+#[cfg(target_os = "linux")]
 pub(crate) const V4L2_CID_EXPOSURE_AUTO: u32 = 0x009A_0901;
 #[cfg(target_os = "linux")]
 pub(crate) const V4L2_CID_EXPOSURE_AUTO_PRIORITY: u32 = 0x009A_0903;
@@ -129,12 +132,18 @@ pub(crate) const V4L2_CID_EXPOSURE_AUTO_PRIORITY: u32 = 0x009A_0903;
 //   1 = MANUAL
 //   2 = SHUTTER_PRIORITY  (manual exposure, auto iris)
 //   3 = APERTURE_PRIORITY (auto exposure time, manual iris)
-// Most UVC webcams only support {1, 3}; some cameras expose the full
-// enum. We try APERTURE_PRIORITY first and fall back to AUTO.
-#[cfg(target_os = "linux")]
-pub(crate) const EXPOSURE_AUTO_APERTURE_PRIORITY: i64 = 3;
+//
+// We try FULL_AUTO first and fall back to APERTURE_PRIORITY. Both are
+// "auto-exposure" in the colloquial sense, but on UVC firmwares that
+// implement only the {MANUAL, APERTURE_PRIORITY} subset, aperture
+// priority is sometimes interpreted as "exposure stays at whatever the
+// driver last set it to" rather than tracking scene brightness — i.e.
+// not actually responsive to changing light. Full auto is the value
+// that real-world webcams reliably interpret as "adapt to the scene."
 #[cfg(target_os = "linux")]
 pub(crate) const EXPOSURE_AUTO_FULL_AUTO: i64 = 0;
+#[cfg(target_os = "linux")]
+pub(crate) const EXPOSURE_AUTO_APERTURE_PRIORITY: i64 = 3;
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::enable_auto_image_controls;
@@ -146,7 +155,7 @@ mod linux_impl {
         EXPOSURE_AUTO_APERTURE_PRIORITY, EXPOSURE_AUTO_FULL_AUTO,
         V4L2_CID_AUTOGAIN, V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION,
         V4L2_CID_BRIGHTNESS, V4L2_CID_CONTRAST, V4L2_CID_EXPOSURE_AUTO,
-        V4L2_CID_EXPOSURE_AUTO_PRIORITY,
+        V4L2_CID_EXPOSURE_AUTO_PRIORITY, V4L2_CID_GAMMA,
     };
     use crate::config::CameraControlsConfig;
     use std::collections::HashMap;
@@ -179,6 +188,18 @@ mod linux_impl {
                 return report;
             }
         };
+
+        // --- Reset stuck controls back to driver default ---
+        // Other apps (browsers, conferencing tools) sometimes leave
+        // gamma cranked way above the manufacturer default; the
+        // auto-exposure loop can't recover from that and the image
+        // arrives permanently over-bright. Writing the driver-reported
+        // default back is a load-bearing reset, not a bias.
+        report.gamma_reset = Some(if profile.gamma_reset {
+            reset_to_default(dev, &ranges, V4L2_CID_GAMMA, "gamma")
+        } else {
+            ControlOutcome::Skipped
+        });
 
         // --- Auto-exposure ---
         if profile.auto_exposure {
@@ -225,6 +246,13 @@ mod linux_impl {
         });
 
         // --- Subject-friendly biases ---
+        // For the controls we *might* bias, reset to driver default
+        // when no bias is requested. V4L2 controls are persistent
+        // across sessions: a prior run that wrote backlight=MAX or
+        // brightness=+13 leaves those values stuck until something
+        // (kernel reload, another app, us) writes them back. If the
+        // user has turned a bias off, they want the camera default
+        // — not "whatever nailbite set yesterday."
         report.backlight_compensation = Some(if profile.backlight_compensation_max {
             set_to_max(
                 dev,
@@ -234,7 +262,7 @@ mod linux_impl {
                 true,
             )
         } else {
-            ControlOutcome::Skipped
+            reset_to_default(dev, &ranges, V4L2_CID_BACKLIGHT_COMPENSATION, "backlight_compensation")
         });
 
         report.brightness = Some(match profile.brightness_fraction {
@@ -246,7 +274,7 @@ mod linux_impl {
                 "brightness",
                 false,
             ),
-            None => ControlOutcome::Skipped,
+            None => reset_to_default(dev, &ranges, V4L2_CID_BRIGHTNESS, "brightness"),
         });
 
         report.contrast = Some(match profile.contrast_fraction {
@@ -258,10 +286,11 @@ mod linux_impl {
                 "contrast",
                 false,
             ),
-            None => ControlOutcome::Skipped,
+            None => reset_to_default(dev, &ranges, V4L2_CID_CONTRAST, "contrast"),
         });
 
         info!(
+            ?report.gamma_reset,
             ?report.auto_exposure,
             ?report.exposure_auto_priority,
             ?report.auto_white_balance,
@@ -284,8 +313,15 @@ mod linux_impl {
         }
     }
 
-    /// Try APERTURE_PRIORITY first, then AUTO. Most UVC cameras only
-    /// expose APERTURE_PRIORITY; a few firmwares only accept full AUTO.
+    /// Try FULL_AUTO first, then APERTURE_PRIORITY. Real-world UVC
+    /// webcams interpret APERTURE_PRIORITY inconsistently — on several
+    /// firmwares it means "exposure stays at its last manual value,
+    /// only the iris adapts" rather than tracking scene brightness, so
+    /// the image stops responding to changing light. FULL_AUTO is the
+    /// value cameras reliably interpret as "adapt to the scene." If
+    /// the driver rejects FULL_AUTO we fall back to APERTURE_PRIORITY
+    /// because some firmwares only expose the {MANUAL, APERTURE_PRIORITY}
+    /// subset of the menu.
     fn apply_auto_exposure(
         dev: &Device,
         ranges: &HashMap<u32, ControlRange>,
@@ -296,15 +332,15 @@ mod linux_impl {
         }
         if let Err(e) = dev.set_control(Control {
             id: V4L2_CID_EXPOSURE_AUTO,
-            value: ControlValue::Integer(EXPOSURE_AUTO_APERTURE_PRIORITY),
+            value: ControlValue::Integer(EXPOSURE_AUTO_FULL_AUTO),
         }) {
             debug!(
                 error = %e,
-                "exposure_auto=aperture_priority rejected; trying full-auto fallback"
+                "exposure_auto=full_auto rejected; trying aperture_priority fallback"
             );
             if let Err(e2) = dev.set_control(Control {
                 id: V4L2_CID_EXPOSURE_AUTO,
-                value: ControlValue::Integer(EXPOSURE_AUTO_FULL_AUTO),
+                value: ControlValue::Integer(EXPOSURE_AUTO_APERTURE_PRIORITY),
             }) {
                 warn!(
                     error = %e2,
@@ -312,11 +348,41 @@ mod linux_impl {
                 );
                 return ControlOutcome::Failed;
             }
-            info!("Camera auto-exposure enabled (full auto)");
-            return ControlOutcome::Applied(EXPOSURE_AUTO_FULL_AUTO);
+            info!("Camera auto-exposure enabled (aperture priority — full auto unavailable)");
+            return ControlOutcome::Applied(EXPOSURE_AUTO_APERTURE_PRIORITY);
         }
-        info!("Camera auto-exposure enabled (aperture priority)");
-        ControlOutcome::Applied(EXPOSURE_AUTO_APERTURE_PRIORITY)
+        info!("Camera auto-exposure enabled (full auto)");
+        ControlOutcome::Applied(EXPOSURE_AUTO_FULL_AUTO)
+    }
+
+    /// Write a control back to the driver-reported `default` value.
+    /// Used for controls that another app may have left in a stuck
+    /// state (gamma is the canonical offender). Treated as
+    /// `Unsupported` if the driver doesn't expose the control.
+    fn reset_to_default(
+        dev: &Device,
+        ranges: &HashMap<u32, ControlRange>,
+        id: u32,
+        label: &str,
+    ) -> ControlOutcome {
+        let Some(range) = ranges.get(&id) else {
+            debug!(label, "Control unsupported; skipping reset");
+            return ControlOutcome::Unsupported;
+        };
+        let value = range.default;
+        match dev.set_control(Control {
+            id,
+            value: ControlValue::Integer(value),
+        }) {
+            Ok(()) => {
+                info!(label, value, "Camera control reset to driver default");
+                ControlOutcome::Applied(value)
+            }
+            Err(e) => {
+                warn!(error = %e, label, value, "Reset to driver default rejected");
+                ControlOutcome::Failed
+            }
+        }
     }
 
     fn set_boolean(

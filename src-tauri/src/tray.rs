@@ -23,7 +23,11 @@ pub enum TrayState {
     /// Detection paused by the user (gray/amber, distinct from NotReady).
     Paused,
     /// Camera is on but no user is in frame — detection is gated off
-    /// to avoid false positives on an empty chair (dark gray).
+    /// to avoid false positives on an empty chair (dark gray). Not
+    /// driven by the face/pose presence vote at the moment (that
+    /// proved unreliable in real-world lighting); reserved for a
+    /// future explicit signal (manual "I'm away" toggle, idle
+    /// timeout, etc.).
     Absent,
 }
 
@@ -37,11 +41,11 @@ pub fn apply_tray_state(app: &AppHandle, state: TrayState, today_count: Option<u
             warn!(error = %e, "Failed to update tray icon");
         }
         let base = match state {
-            TrayState::Ready => "Nailbite - Monitoring",
-            TrayState::Detecting => "Nailbite - BFRB Detected!",
-            TrayState::NotReady => "Nailbite - Camera not started",
-            TrayState::Paused => "Nailbite - Detection paused",
-            TrayState::Absent => "Nailbite - No one in frame",
+            TrayState::Ready => "nailbite - Monitoring",
+            TrayState::Detecting => "nailbite - BFRB Detected!",
+            TrayState::NotReady => "nailbite - Camera not started",
+            TrayState::Paused => "nailbite - Detection paused",
+            TrayState::Absent => "nailbite - No one in frame",
         };
         let tooltip = match today_count {
             Some(n) => format!("{base} ({n} today)"),

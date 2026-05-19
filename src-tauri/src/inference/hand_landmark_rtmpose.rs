@@ -20,7 +20,6 @@
 
 use std::sync::Arc;
 
-use ndarray::Array4;
 use ort::inputs;
 use ort::value::TensorRef;
 use tracing::debug;
@@ -28,7 +27,7 @@ use tracing::debug;
 use crate::detection::types::{HandDetection, HandSide, Landmark};
 use crate::errors::InferenceError;
 use crate::frame::Frame;
-use crate::inference::preprocessing::{preprocess_roi, NormalizeRange, SquareRoi};
+use crate::inference::preprocessing::{preprocess_rotated_nchw_imagenet, RotatedRoi};
 use crate::inference::session::ModelSession;
 
 const INPUT_SIZE: u32 = 256;
@@ -56,34 +55,25 @@ impl RtmPoseHandLandmarker {
         Self { session }
     }
 
-    /// Run hand landmark estimation on a cropped hand ROI.
+    /// Run hand landmark estimation on a rotation-normalised crop.
     ///
-    /// `roi` is `[x_min, y_min, x_max, y_max]` in normalized coordinates.
-    /// Returns landmarks mapped back to full-frame normalized coordinates,
-    /// matching the output convention of [`crate::inference::hand_landmark::HandLandmarker`]
-    /// so callers can swap the two implementations.
+    /// The crop is sampled along `roi`'s axes (so the hand fingers point
+    /// up in the model's frame of reference) and landmarks are inverse-
+    /// rotated back into image-normalised coordinates.
     pub fn estimate(
         &self,
         frame: &Frame,
-        roi: &[f32; 4],
+        roi: &RotatedRoi,
     ) -> Result<Option<HandDetection>, InferenceError> {
-        // RTMPose expects NCHW with ImageNet normalization. preprocess_roi
-        // produces NHWC ZeroOne, so we run our own NCHW pass below — but
-        // we still want the square-ROI side effect (expanding the shorter
-        // dimension to make the crop square in pixel space). To get that,
-        // we call preprocess_roi for the SquareRoi only and then redo
-        // preprocessing in NCHW with the right normalization.
-        let (_discard, square_roi) = preprocess_roi(
+        // RTMPose expects NCHW with ImageNet normalisation, sampled from
+        // a rotation-normalised square crop.
+        let tensor = preprocess_rotated_nchw_imagenet(
             frame,
-            roi[0],
-            roi[1],
-            roi[2],
-            roi[3],
+            roi,
             INPUT_SIZE,
-            NormalizeRange::ZeroOne,
+            IMAGENET_MEAN,
+            IMAGENET_STD,
         );
-
-        let tensor = preprocess_square_nchw(frame, &square_roi, INPUT_SIZE);
 
         let input = TensorRef::from_array_view(&tensor)
             .map_err(|e| InferenceError::Ort(e.to_string()))?;
@@ -134,9 +124,6 @@ impl RtmPoseHandLandmarker {
         let mut peak_sum = 0.0_f32;
         let mut peak_count = 0_u32;
 
-        let roi_w = square_roi.x_max - square_roi.x_min;
-        let roi_h = square_roi.y_max - square_roi.y_min;
-
         for (k, slot) in landmarks.iter_mut().enumerate().take(kp_count) {
             let x_slice_start = k * x_bins;
             let y_slice_start = k * y_bins;
@@ -153,13 +140,16 @@ impl RtmPoseHandLandmarker {
             // Pixel coordinates in INPUT_SIZE-space.
             let px = x_bin as f32 / SIMCC_SPLIT_RATIO;
             let py = y_bin as f32 / SIMCC_SPLIT_RATIO;
-            // Normalize within the square crop, then map to original frame.
+            // Normalise within the square crop, then inverse-rotate back
+            // into image-normalised coordinates.
             let nx = px / INPUT_SIZE as f32;
             let ny = py / INPUT_SIZE as f32;
 
+            let (img_x, img_y, _img_z) =
+                roi.landmark_to_image(nx, ny, 0.0, frame.width, frame.height);
             *slot = Landmark {
-                x: square_roi.x_min + nx * roi_w,
-                y: square_roi.y_min + ny * roi_h,
+                x: img_x,
+                y: img_y,
                 // Z is not produced by SimCC; emit 0 to stay
                 // schema-compatible with the MediaPipe path.
                 z: 0.0,
@@ -198,75 +188,6 @@ impl RtmPoseHandLandmarker {
     }
 }
 
-/// Preprocess a square ROI into RTMPose's expected `[1, 3, H, W]` tensor.
-///
-/// The crop is taken in pixel space using the already-square `SquareRoi`
-/// returned by `preprocess_roi`, then bilinearly resized to `INPUT_SIZE`
-/// and normalized with ImageNet statistics in NCHW layout.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::indexing_slicing)]
-fn preprocess_square_nchw(frame: &Frame, roi: &SquareRoi, input_size: u32) -> Array4<f32> {
-    let fw = frame.width as f32;
-    let fh = frame.height as f32;
-
-    // Pixel-space crop bounds.
-    let px_x0 = (roi.x_min * fw).clamp(0.0, fw) as u32;
-    let px_y0 = (roi.y_min * fh).clamp(0.0, fh) as u32;
-    let px_x1 = (roi.x_max * fw).clamp(0.0, fw) as u32;
-    let px_y1 = (roi.y_max * fh).clamp(0.0, fh) as u32;
-
-    let crop_w = px_x1.saturating_sub(px_x0).max(1);
-    let crop_h = px_y1.saturating_sub(px_y0).max(1);
-
-    // Bilinear resize directly from the source frame into INPUT_SIZE x INPUT_SIZE.
-    let isz = input_size as usize;
-    let mut tensor = Array4::<f32>::zeros((1, 3, isz, isz));
-
-    let x_ratio = crop_w as f32 / input_size as f32;
-    let y_ratio = crop_h as f32 / input_size as f32;
-
-    for dy in 0..isz {
-        for dx in 0..isz {
-            let sx = (dx as f32 + 0.5) * x_ratio - 0.5;
-            let sy = (dy as f32 + 0.5) * y_ratio - 0.5;
-            let sx = sx.clamp(0.0, (crop_w - 1) as f32);
-            let sy = sy.clamp(0.0, (crop_h - 1) as f32);
-
-            let x0 = sx as u32;
-            let y0 = sy as u32;
-            let x1 = (x0 + 1).min(crop_w - 1);
-            let y1 = (y0 + 1).min(crop_h - 1);
-            let xf = sx - x0 as f32;
-            let yf = sy - y0 as f32;
-
-            let mut samples = [0.0_f32; 3];
-            for (c, out) in samples.iter_mut().enumerate() {
-                let s00 = sample(frame, px_x0 + x0, px_y0 + y0, c);
-                let s10 = sample(frame, px_x0 + x1, px_y0 + y0, c);
-                let s01 = sample(frame, px_x0 + x0, px_y0 + y1, c);
-                let s11 = sample(frame, px_x0 + x1, px_y0 + y1, c);
-                let top = s00 * (1.0 - xf) + s10 * xf;
-                let bot = s01 * (1.0 - xf) + s11 * xf;
-                *out = top * (1.0 - yf) + bot * yf;
-            }
-
-            for c in 0..3 {
-                let normalized = (samples[c] - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
-                tensor[[0, c, dy, dx]] = normalized;
-            }
-        }
-    }
-
-    tensor
-}
-
-#[inline]
-fn sample(frame: &Frame, x: u32, y: u32, c: usize) -> f32 {
-    let x = x.min(frame.width.saturating_sub(1));
-    let y = y.min(frame.height.saturating_sub(1));
-    let idx = ((y * frame.width + x) * 3) as usize + c;
-    frame.data.get(idx).copied().map_or(0.0, f32::from)
-}
-
 #[inline]
 fn argmax(slice: &[f32]) -> (usize, f32) {
     let mut best_idx = 0_usize;
@@ -300,17 +221,18 @@ mod tests {
     }
 
     #[test]
-    fn preprocess_produces_nchw_shape() {
+    fn rotated_preprocess_produces_nchw_shape() {
         let frame = Frame::new(vec![128_u8; 64 * 64 * 3], 64, 64);
-        let roi = SquareRoi {
-            x_min: 0.0,
-            y_min: 0.0,
-            x_max: 1.0,
-            y_max: 1.0,
+        let roi = RotatedRoi {
+            cx_px: 32.0,
+            cy_px: 32.0,
+            size_px: 64.0,
+            rotation_rad: 0.0,
         };
-        let tensor = preprocess_square_nchw(&frame, &roi, 256);
+        let tensor = preprocess_rotated_nchw_imagenet(
+            &frame, &roi, 256, IMAGENET_MEAN, IMAGENET_STD,
+        );
         assert_eq!(tensor.shape(), &[1, 3, 256, 256]);
-        // Mid-grey input minus mean / std should be a constant per channel.
         for c in 0..3 {
             let expected = (128.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
             let got = tensor[[0, c, 128, 128]];

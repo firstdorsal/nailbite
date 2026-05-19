@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and run the Nailbite AppImage.
+# Build and run the nailbite AppImage.
 #
 # Usage:
 #   bash scripts/run-appimage.sh              # Build + run
@@ -60,7 +60,7 @@ fi
 # Build
 if [ "${SKIP_BUILD}" = "0" ]; then
     echo "=========================================="
-    echo "Building Nailbite AppImage..."
+    echo "Building nailbite AppImage..."
     echo "=========================================="
     echo ""
 

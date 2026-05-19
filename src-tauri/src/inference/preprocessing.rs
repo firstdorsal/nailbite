@@ -166,6 +166,151 @@ pub struct SquareRoi {
     pub y_max: f32,
 }
 
+/// Rotated square ROI in source pixel space.
+///
+/// MediaPipe's hand landmark model expects rotation-normalised crops: the
+/// hand pre-rotated so the fingers point up. Feeding it axis-aligned crops
+/// at arbitrary angles puts the input out of distribution and the model
+/// returns garbage geometry / unstable confidences. This struct captures
+/// the centre, side length, and orientation of the crop so we can sample
+/// the source frame along rotated axes and inverse-rotate the model output
+/// back into image coordinates.
+///
+/// `rotation_rad` is the angle (counter-clockwise, image-coord convention
+/// where +y points down) at which the crop's local "+x" axis sits relative
+/// to image "+x". In other words, when sampling, the crop's local up axis
+/// (decreasing v) corresponds to image direction
+/// `(sin(rotation_rad), -cos(rotation_rad))` — exactly the wrist→middle-MCP
+/// direction emitted by the palm detector when `rotation_rad` is computed
+/// via [`RotatedRoi::from_keypoints`].
+#[derive(Debug, Clone, Copy)]
+pub struct RotatedRoi {
+    /// Centre of the crop in source pixel coordinates.
+    pub cx_px: f32,
+    pub cy_px: f32,
+    /// Side length of the square crop, in source pixels.
+    pub size_px: f32,
+    /// Rotation in radians (counter-clockwise in image coords).
+    pub rotation_rad: f32,
+}
+
+impl RotatedRoi {
+    /// Build a rotated ROI from two image-normalised points along the hand
+    /// axis (wrist → middle-finger MCP, or elbow → wrist) and a square side
+    /// length in pixels.
+    ///
+    /// The "up" axis of the resulting crop points along `from → to` in the
+    /// source frame. The crop is centred at `centre` (not at the midpoint
+    /// of the two points) so callers can decide whether to bias the box
+    /// toward the fingers or the palm.
+    pub fn from_axis(
+        centre_nx: f32,
+        centre_ny: f32,
+        from_nx: f32,
+        from_ny: f32,
+        to_nx: f32,
+        to_ny: f32,
+        size_px: f32,
+        frame_w: u32,
+        frame_h: u32,
+    ) -> Self {
+        let dx = to_nx - from_nx;
+        let dy = to_ny - from_ny;
+        // theta is the image-coord angle of the `from → to` vector. We
+        // want the crop's "up" axis (image dir `(sin R, -cos R)`) to align
+        // with that vector, which gives R = theta + π/2.
+        let theta = dy.atan2(dx);
+        let rotation_rad = theta + std::f32::consts::FRAC_PI_2;
+        Self {
+            cx_px: centre_nx * frame_w as f32,
+            cy_px: centre_ny * frame_h as f32,
+            size_px: size_px.max(1.0),
+            rotation_rad,
+        }
+    }
+
+    /// Build a rotated ROI from a horizontal reference (e.g. eye line)
+    /// that should align with the crop's `+x` axis. Used by the face
+    /// mesh pipeline: align the right-eye → left-eye vector with crop
+    /// "+x" so the model receives an upright, eye-level face.
+    pub fn from_horizontal_axis(
+        centre_nx: f32,
+        centre_ny: f32,
+        from_nx: f32,
+        from_ny: f32,
+        to_nx: f32,
+        to_ny: f32,
+        size_px: f32,
+        frame_w: u32,
+        frame_h: u32,
+    ) -> Self {
+        let dx = to_nx - from_nx;
+        let dy = to_ny - from_ny;
+        // For the horizontal reference, the from→to angle equals the
+        // crop's `+x` axis image angle directly (R = theta).
+        let rotation_rad = dy.atan2(dx);
+        Self {
+            cx_px: centre_nx * frame_w as f32,
+            cy_px: centre_ny * frame_h as f32,
+            size_px: size_px.max(1.0),
+            rotation_rad,
+        }
+    }
+
+    /// Axis-aligned fallback: build a rotated ROI with zero rotation from
+    /// a normalised bbox. Useful when keypoints aren't available.
+    pub fn from_axis_aligned_bbox(
+        bbox: &[f32; 4],
+        frame_w: u32,
+        frame_h: u32,
+    ) -> Self {
+        let cx_n = (bbox[0] + bbox[2]) * 0.5;
+        let cy_n = (bbox[1] + bbox[3]) * 0.5;
+        let w_px = (bbox[2] - bbox[0]) * frame_w as f32;
+        let h_px = (bbox[3] - bbox[1]) * frame_h as f32;
+        Self {
+            cx_px: cx_n * frame_w as f32,
+            cy_px: cy_n * frame_h as f32,
+            size_px: w_px.max(h_px).max(1.0),
+            rotation_rad: 0.0,
+        }
+    }
+
+    /// Map a model-output landmark (in normalised crop coordinates, where
+    /// (0, 0) is the crop's top-left and (1, 1) is the bottom-right) back
+    /// to image-normalised coordinates ([0, 1] of `frame_w` × `frame_h`).
+    ///
+    /// This is the inverse of the sampling done in
+    /// [`preprocess_rotated_nhwc`] / [`preprocess_rotated_nchw_imagenet`]:
+    /// it translates the landmark into crop-local pixel offsets, rotates
+    /// by `rotation_rad`, adds the crop centre, then normalises by the
+    /// frame size. Z is scaled by `size_px` so the depth coordinate is in
+    /// the same pixel unit as x/y.
+    pub fn landmark_to_image(
+        &self,
+        nx: f32,
+        ny: f32,
+        nz: f32,
+        frame_w: u32,
+        frame_h: u32,
+    ) -> (f32, f32, f32) {
+        let offset_u = (nx - 0.5) * self.size_px;
+        let offset_v = (ny - 0.5) * self.size_px;
+        let cos = self.rotation_rad.cos();
+        let sin = self.rotation_rad.sin();
+        let rot_u = offset_u * cos - offset_v * sin;
+        let rot_v = offset_u * sin + offset_v * cos;
+        let px = self.cx_px + rot_u;
+        let py = self.cy_px + rot_v;
+        let img_x = px / frame_w as f32;
+        let img_y = py / frame_h as f32;
+        // Z is reported by the model in the same normalised units as x/y
+        // (relative to the crop), so scale it to source pixels.
+        let img_z = nz * self.size_px / frame_w as f32;
+        (img_x, img_y, img_z)
+    }
+}
+
 /// Preprocess a cropped region of a frame (specified by a bounding box).
 ///
 /// Makes the crop square in pixel space (expanding the shorter side) before
@@ -231,6 +376,154 @@ pub fn preprocess_roi(
     };
 
     (tensor, square_roi)
+}
+
+/// Sample a rotated square crop from the source frame into an NHWC tensor
+/// with values in `[0, 1]` (`ZeroOne`) or `[-1, 1]` (`NegOneOne`).
+///
+/// For each output pixel `(du, dv)` we compute its location in the
+/// **rotated** source frame:
+///
+/// 1. Translate into crop-local pixel space, centred at zero.
+/// 2. Rotate by `roi.rotation_rad` to get the source-frame pixel offset.
+/// 3. Add `roi.cx_px, roi.cy_px` to get the absolute source pixel.
+/// 4. Bilinear sample, normalise, and write into the tensor.
+///
+/// Pixels that land outside the source frame are zero-filled (black). This
+/// matches MediaPipe's hand pipeline: the model is robust to a small amount
+/// of padding around the crop edges.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::indexing_slicing)]
+pub fn preprocess_rotated_nhwc(
+    frame: &Frame,
+    roi: &RotatedRoi,
+    target_size: u32,
+    range: NormalizeRange,
+) -> Array4<f32> {
+    let ts = target_size as usize;
+    let mut tensor = Array4::<f32>::zeros((1, ts, ts, 3));
+
+    let pad_value = match range {
+        NormalizeRange::ZeroOne => 0.0,
+        NormalizeRange::NegOneOne => -1.0,
+    };
+    if matches!(range, NormalizeRange::NegOneOne) {
+        tensor.fill(pad_value);
+    }
+
+    let cos = roi.rotation_rad.cos();
+    let sin = roi.rotation_rad.sin();
+    let step = roi.size_px / target_size as f32;
+    let half = (target_size as f32 - 1.0) * 0.5;
+
+    let fw = frame.width as i32;
+    let fh = frame.height as i32;
+
+    for dy in 0..ts {
+        for dx in 0..ts {
+            // Crop-local offset in source-pixel units, centred at zero.
+            let u = (dx as f32 - half) * step;
+            let v = (dy as f32 - half) * step;
+            // Rotate into source frame.
+            let sx = roi.cx_px + u * cos - v * sin;
+            let sy = roi.cy_px + u * sin + v * cos;
+
+            let (r, g, b) = bilinear_sample(&frame.data, frame.width, frame.height, sx, sy);
+
+            let (r, g, b) = match range {
+                NormalizeRange::ZeroOne => (r / 255.0, g / 255.0, b / 255.0),
+                NormalizeRange::NegOneOne => (
+                    r / 127.5 - 1.0,
+                    g / 127.5 - 1.0,
+                    b / 127.5 - 1.0,
+                ),
+            };
+
+            tensor[[0, dy, dx, 0]] = r;
+            tensor[[0, dy, dx, 1]] = g;
+            tensor[[0, dy, dx, 2]] = b;
+        }
+    }
+
+    // Bounds reference so dead-code lint doesn't complain when this fn is
+    // used by only one of the two landmark backends.
+    let _ = (fw, fh);
+    tensor
+}
+
+/// Same sampling geometry as [`preprocess_rotated_nhwc`] but emits the
+/// `[1, 3, H, W]` ImageNet-normalised layout that RTMPose expects.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::indexing_slicing)]
+pub fn preprocess_rotated_nchw_imagenet(
+    frame: &Frame,
+    roi: &RotatedRoi,
+    target_size: u32,
+    mean: [f32; 3],
+    std: [f32; 3],
+) -> Array4<f32> {
+    let ts = target_size as usize;
+    let mut tensor = Array4::<f32>::zeros((1, 3, ts, ts));
+
+    let cos = roi.rotation_rad.cos();
+    let sin = roi.rotation_rad.sin();
+    let step = roi.size_px / target_size as f32;
+    let half = (target_size as f32 - 1.0) * 0.5;
+
+    for dy in 0..ts {
+        for dx in 0..ts {
+            let u = (dx as f32 - half) * step;
+            let v = (dy as f32 - half) * step;
+            let sx = roi.cx_px + u * cos - v * sin;
+            let sy = roi.cy_px + u * sin + v * cos;
+
+            let (r, g, b) = bilinear_sample(&frame.data, frame.width, frame.height, sx, sy);
+            let channels = [r, g, b];
+            for c in 0..3 {
+                tensor[[0, c, dy, dx]] = (channels[c] - mean[c]) / std[c];
+            }
+        }
+    }
+
+    tensor
+}
+
+/// Bilinear sampler over an RGB byte buffer. Returns 0 for samples that
+/// fall outside the frame.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn bilinear_sample(data: &[u8], width: u32, height: u32, sx: f32, sy: f32) -> (f32, f32, f32) {
+    if sx < 0.0 || sy < 0.0 || sx > (width - 1) as f32 || sy > (height - 1) as f32 {
+        return (0.0, 0.0, 0.0);
+    }
+    let x0 = sx.floor() as u32;
+    let y0 = sy.floor() as u32;
+    let x1 = (x0 + 1).min(width.saturating_sub(1));
+    let y1 = (y0 + 1).min(height.saturating_sub(1));
+    let xf = sx - x0 as f32;
+    let yf = sy - y0 as f32;
+
+    let get = |px: u32, py: u32| -> (f32, f32, f32) {
+        let idx = ((py * width + px) * 3) as usize;
+        let r = data.get(idx).copied().map_or(0.0, f32::from);
+        let g = data.get(idx + 1).copied().map_or(0.0, f32::from);
+        let b = data.get(idx + 2).copied().map_or(0.0, f32::from);
+        (r, g, b)
+    };
+
+    let (r00, g00, b00) = get(x0, y0);
+    let (r10, g10, b10) = get(x1, y0);
+    let (r01, g01, b01) = get(x0, y1);
+    let (r11, g11, b11) = get(x1, y1);
+
+    let blend = |a: f32, b: f32, c: f32, d: f32| -> f32 {
+        let top = a * (1.0 - xf) + b * xf;
+        let bot = c * (1.0 - xf) + d * xf;
+        top * (1.0 - yf) + bot * yf
+    };
+
+    (
+        blend(r00, r10, r01, r11),
+        blend(g00, g10, g01, g11),
+        blend(b00, b10, b01, b11),
+    )
 }
 
 /// Simple resize + normalize without letterbox padding.
@@ -506,6 +799,134 @@ mod tests {
             (px_w - px_h).abs() < 2.0,
             "pixel crop should be square: {px_w} x {px_h}"
         );
+    }
+
+    #[test]
+    fn rotated_roi_identity_rotation_matches_axis_aligned() {
+        // With rotation = 0, the rotated sampler must produce the same
+        // landmark mapping as a plain centred crop.
+        let roi = RotatedRoi {
+            cx_px: 320.0,
+            cy_px: 240.0,
+            size_px: 100.0,
+            rotation_rad: 0.0,
+        };
+        let (x, y, _z) = roi.landmark_to_image(0.5, 0.5, 0.0, 640, 480);
+        assert!((x - 0.5).abs() < 1e-6, "centre maps to centre: x={x}");
+        assert!((y - 0.5).abs() < 1e-6, "centre maps to centre: y={y}");
+
+        let (x_left, y_left, _) = roi.landmark_to_image(0.0, 0.5, 0.0, 640, 480);
+        // Left edge of model crop -> centre_x - size/2 in pixels.
+        let expected_x = (320.0 - 50.0) / 640.0;
+        assert!(
+            (x_left - expected_x).abs() < 1e-4,
+            "left edge x={x_left}, expected {expected_x}"
+        );
+        assert!((y_left - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rotated_roi_90deg_rotates_landmarks() {
+        // rotation = π/2 means crop's local "up" (-v) points toward image
+        // "+x" (right). So a landmark at the *top* of the crop should map
+        // to a pixel to the *right* of the crop centre in the image.
+        let roi = RotatedRoi {
+            cx_px: 300.0,
+            cy_px: 200.0,
+            size_px: 100.0,
+            rotation_rad: std::f32::consts::FRAC_PI_2,
+        };
+        // Landmark at top of crop: (0.5, 0.0) -> offset_u=0, offset_v=-50
+        // After R=π/2: rot_u = 0*0 - (-50)*1 = 50, rot_v = 0*1 + (-50)*0 = 0
+        // So image px = (350, 200).
+        let (x, y, _) = roi.landmark_to_image(0.5, 0.0, 0.0, 640, 480);
+        let expected_x = 350.0 / 640.0;
+        let expected_y = 200.0 / 480.0;
+        assert!(
+            (x - expected_x).abs() < 1e-4,
+            "top-of-crop x={x}, expected {expected_x}"
+        );
+        assert!(
+            (y - expected_y).abs() < 1e-4,
+            "top-of-crop y={y}, expected {expected_y}"
+        );
+    }
+
+    #[test]
+    fn rotated_roi_from_axis_aligns_up_with_direction() {
+        // wrist below mid_mcp in image (fingers pointing up).
+        let wrist = (0.5, 0.7);
+        let mid_mcp = (0.5, 0.4);
+        let roi = RotatedRoi::from_axis(
+            0.5, 0.55, // centre
+            wrist.0, wrist.1, mid_mcp.0, mid_mcp.1,
+            120.0, 640, 480,
+        );
+        // For a vertical "fingers up" hand, rotation should be ~0
+        // (no rotation needed — already upright).
+        assert!(
+            roi.rotation_rad.abs() < 1e-4,
+            "vertical hand should not rotate, got {}",
+            roi.rotation_rad
+        );
+
+        // Hand pointing to the right: wrist at left, mid_mcp at right.
+        let wrist2 = (0.2, 0.5);
+        let mid_mcp2 = (0.6, 0.5);
+        let roi2 = RotatedRoi::from_axis(
+            0.4, 0.5, wrist2.0, wrist2.1, mid_mcp2.0, mid_mcp2.1,
+            120.0, 640, 480,
+        );
+        // dx=+0.4, dy=0 → theta=0 → R=π/2.
+        let expected = std::f32::consts::FRAC_PI_2;
+        assert!(
+            (roi2.rotation_rad - expected).abs() < 1e-4,
+            "horizontal hand R={}, expected {expected}",
+            roi2.rotation_rad
+        );
+
+        // Verify: landmark at the top of the model crop (where fingers
+        // sit) for the horizontal hand should map to a pixel near the
+        // mid_mcp side of the source.
+        let (x_top, _, _) = roi2.landmark_to_image(0.5, 0.0, 0.0, 640, 480);
+        // Crop is centred at 0.4 (image-normalised x); top of crop maps
+        // to image direction +x = right of centre, so x > 0.4.
+        assert!(x_top > 0.4, "fingers should map to the right of centre");
+    }
+
+    #[test]
+    fn rotated_preprocessing_with_zero_rotation_matches_centre_crop() {
+        // Build a 64x64 frame where each pixel encodes its column in red.
+        // Sampling a centred 32x32 crop with zero rotation should read out
+        // a horizontal gradient that ranges roughly over the central 32
+        // columns.
+        let w = 64_u32;
+        let h = 64_u32;
+        let mut data = vec![0_u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 3) as usize;
+                data[idx] = (x * 4) as u8;
+            }
+        }
+        let frame = Frame::new(data, w, h);
+        let roi = RotatedRoi {
+            cx_px: 32.0,
+            cy_px: 32.0,
+            size_px: 32.0,
+            rotation_rad: 0.0,
+        };
+        let tensor = preprocess_rotated_nhwc(&frame, &roi, 32, NormalizeRange::ZeroOne);
+        // Top row: red channel should increase monotonically across the row.
+        let mut prev = -1.0_f32;
+        for dx in 0..32 {
+            let v = tensor[[0, 0, dx, 0]];
+            assert!(
+                v >= prev - 1e-3,
+                "red channel must be monotonic across x (dx={dx} v={v} prev={prev})"
+            );
+            prev = v;
+        }
     }
 
     #[test]

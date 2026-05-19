@@ -1,6 +1,6 @@
 # GPU Acceleration
 
-Nailbite supports GPU acceleration for ONNX model inference via CUDA, TensorRT, ROCm, and MIGraphX.
+n**AI**lbite supports GPU acceleration for ONNX model inference via CUDA, TensorRT, ROCm, and MIGraphX.
 
 ## Supported Backends
 

@@ -1,4 +1,4 @@
-//! Error types for the Nailbite Tauri app.
+//! Error types for the nailbite Tauri app.
 
 use thiserror::Error;
 

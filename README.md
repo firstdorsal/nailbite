@@ -1,8 +1,8 @@
-# Nailbite
+# n**AI**lbite
 
 **A quiet companion that notices when your hands wander to your face — and gently lets you know.**
 
-If you've ever caught yourself mid-bite and thought "oh, again" — Nailbite is built for that
+If you've ever caught yourself mid-bite and thought "oh, again" — n**AI**lbite is built for that
 moment. It watches your webcam, recognises a small set of body-focused repetitive behaviours
 (BFRBs) — currently nail biting and nail picking — and surfaces a soft alert when it sees one.
 That's it. No streaks, no scolding, no leaderboards. You decide what to do with the nudge.
@@ -52,7 +52,7 @@ problem. It is not a medical device, and it doesn't try to be one.
 ## Screenshot
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Nailbite live preview with hand, face mesh, and pose torso landmarks overlaid; tray status reads 'Monitoring'" width="780">
+  <img src="docs/images/hero.png" alt="nailbite live preview with hand, face mesh, and pose torso landmarks overlaid; tray status reads 'Monitoring'" width="780">
 </p>
 
 The live preview during monitoring. Hand landmarks (green = left, orange = right)
@@ -124,7 +124,7 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 ## Using it
 
 The first launch downloads a small set of ONNX models (~50 MB) and caches them locally. After
-that, Nailbite lives in your system tray:
+that, n**AI**lbite lives in your system tray:
 
 - 🟢 monitoring
 - 🟡 paused
@@ -321,7 +321,7 @@ kinder over time.
 
 GNU Affero General Public License v3.0 — see `LICENSE`.
 
-In short: you're free to use, modify, and redistribute Nailbite. If you run a
+In short: you're free to use, modify, and redistribute n**AI**lbite. If you run a
 modified version as a network service, you have to make your source available
 to its users too. The aim is to keep the tool — and any improvements made to
 it — open for the community that depends on it.

@@ -80,7 +80,21 @@ pub struct AppState {
     /// AlertModal's verdict / dismiss buttons can also tear down the
     /// notification — leaving it hanging around once the user has
     /// already labeled the event would be confusing.
+    ///
+    /// **Not used for dedup.** `notify-rust`'s `wait_for_action` can
+    /// hang indefinitely on some daemons (notably KDE / `swaync`
+    /// configurations); when it does, the slot would otherwise stick
+    /// and block every future notification. Dedup lives in
+    /// `last_notification_at` below; this id only feeds
+    /// `close_active_notification`.
     pub active_notification_id: Mutex<Option<u32>>,
+
+    /// When the last desktop notification was submitted to the daemon.
+    /// Used for time-based dedup so two BFRB events that fire back-to-
+    /// back don't produce two overlapping toasts. Independent of
+    /// `active_notification_id` so a hung `wait_for_action` thread
+    /// can't lock out future notifications.
+    pub last_notification_at: Mutex<Option<Instant>>,
 
     /// Webhook action for remote notifications (None if disabled).
     pub webhook_action: Mutex<Option<WebhookAction>>,
@@ -173,6 +187,7 @@ impl AppState {
             alert_active: AtomicBool::new(false),
             sound_action: Mutex::new(sound_action),
             active_notification_id: Mutex::new(None),
+            last_notification_at: Mutex::new(None),
             webhook_action: Mutex::new(webhook_action),
             sound_stop_time: Mutex::new(None),
             app_handle,

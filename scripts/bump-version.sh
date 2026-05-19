@@ -1,5 +1,5 @@
 #!/bin/bash
-# Nailbite Version Bump Script
+# nailbite Version Bump Script
 #
 # Updates version across all project files to maintain consistency.
 #
@@ -33,7 +33,7 @@ fi
 CURRENT_VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
 
 echo "=========================================="
-echo "Nailbite Version Bump"
+echo "nailbite Version Bump"
 echo "Current version: ${CURRENT_VERSION}"
 echo "New version: ${NEW_VERSION}"
 echo "=========================================="

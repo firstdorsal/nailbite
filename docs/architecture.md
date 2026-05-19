@@ -1,6 +1,6 @@
 # Architecture
 
-Nailbite is a desktop application for detecting and interrupting body-focused repetitive behaviors (BFRBs) like nail biting and nail picking.
+n**AI**lbite is a desktop application for detecting and interrupting body-focused repetitive behaviors (BFRBs) like nail biting and nail picking.
 
 ## Overview
 

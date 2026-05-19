@@ -140,7 +140,9 @@ export function TitleBar() {
         className="flex h-full items-center gap-2 pl-3 text-xs font-medium tracking-wide"
       >
         <span className={cn("inline-block h-2.5 w-2.5 rounded-full", state.dotClass)} />
-        <span>Nailbite</span>
+        <span>
+          n<span className="font-extrabold">ai</span>lbite
+        </span>
         <span className="text-muted-foreground">·</span>
         <span className={cn("text-xs font-normal", state.textClass)}>
           {state.label}
